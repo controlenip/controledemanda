@@ -1,53 +1,47 @@
-import customtkinter as ctk
-from aba_lancador import AbaLancador
-from aba_produtividade import AbaProdutividade
+import streamlit as st
 from PIL import Image
 import os
 
-# Configurações do App
-ctk.set_appearance_mode("light")
-ctk.set_default_color_theme("blue")
+# Configuração Base (Deve ser o 1º comando Streamlit do script)
+st.set_page_config(page_title="Gestão de Produtividade NIP", layout="wide", page_icon="⚡")
 
-class App(ctk.CTk):
-    def __init__(self):
-        super().__init__()
+# Importação dos módulos que criamos
+from aba_lancador import render_lancador
+from aba_produtividade import render_produtividade
 
-        self.title("Sistema NIP - Grupo Igneo")
-        self.geometry("1000x700")
+# --- Cabeçalho e Logo ---
+col1, col2 = st.columns([1, 4])
+with col1:
+    try:
+        logo = Image.open("LOGO_NIP.png")
+        st.image(logo, use_column_width=True)
+    except FileNotFoundError:
+        st.write("**(LOGO NIP)**")
+with col2:
+    st.title("Sistema de Gestão de Produtividade")
+    st.subheader("NIP | Grupo Igneo")
 
-        # Cabeçalho com Logo
-        frame_topo = ctk.CTkFrame(self, fg_color="#1C2A59", corner_radius=0, height=80)
-        frame_topo.pack(fill="x")
-        
-        try:
-            # Tenta carregar a logo do github/pasta
-            img = ctk.CTkImage(light_image=Image.open("LOGO_NIP.png"), size=(120, 60))
-            ctk.CTkLabel(frame_topo, image=img, text="").pack(side="left", padx=20, pady=10)
-        except Exception:
-            ctk.CTkLabel(frame_topo, text="NIP | GRUPO IGNEO", font=("Arial", 20, "bold"), text_color="white").pack(side="left", padx=20, pady=20)
+st.divider()
 
-        # Sistema de Abas (Navegação)
-        self.tabview = ctk.CTkTabview(self, fg_color="transparent")
-        self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
+# --- Sistema de Navegação (Abas) ---
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📝 Lançador Rápido", 
+    "📊 Produtividade", 
+    "⚙️ Parâmetros", 
+    "📈 Dashboard Executivo"
+])
 
-        # Criando as abas
-        aba1 = self.tabview.add("📝 Lançador Rápido")
-        aba2 = self.tabview.add("📊 Produtividade")
-        aba3 = self.tabview.add("⚙️ Parâmetros")
-        aba4 = self.tabview.add("📈 Dashboard")
+# Rendeziando o conteúdo de cada arquivo na sua respectiva aba
+with tab1:
+    render_lancador()
 
-        # Instanciando o conteúdo das abas importadas dos outros arquivos
-        # Passamos o método carregar_dados da aba de produtividade para o lançador atualizar a tabela ao salvar
-        self.view_produtividade = AbaProdutividade(aba2)
-        self.view_produtividade.pack(fill="both", expand=True)
+with tab2:
+    render_produtividade()
 
-        self.view_lancador = AbaLancador(aba1, atualizador_tabela=self.view_produtividade.carregar_dados)
-        self.view_lancador.pack(fill="both", expand=True)
+with tab3:
+    st.header("⚙️ Parâmetros")
+    st.info("Aba de Configurações e Parâmetros em Desenvolvimento...")
 
-        # Placeholders para as próximas abas (Parâmetros e Dashboard)
-        ctk.CTkLabel(aba3, text="Configurações e Parâmetros em Desenvolvimento...", font=("Arial", 16)).pack(pady=50)
-        ctk.CTkLabel(aba4, text="Gráficos do Dashboard Executivo em Desenvolvimento...", font=("Arial", 16)).pack(pady=50)
-
-if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+with tab4:
+    st.header("📈 Dashboard Executivo")
+    st.info("Gráficos do Dashboard em Desenvolvimento...")
