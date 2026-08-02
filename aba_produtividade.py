@@ -1,41 +1,32 @@
-import customtkinter as ctk
-from tkinter import ttk
+import streamlit as st
 import database
 
-class AbaProdutividade(ctk.CTkFrame):
-    def __init__(self, master):
-        super().__init__(master, fg_color="transparent")
+def render_produtividade():
+    st.header("📊 Banco de Dados (Equipe)")
+    st.write("Visualização de todos os dados registrados.")
 
-        titulo = ctk.CTkLabel(self, text="DADOS DA EQUIPE (BANCO DE DADOS)", font=("Arial", 18, "bold"), text_color="#1C2A59")
-        titulo.pack(pady=20)
-
-        # Configuração da Tabela
-        colunas = ("Data", "Colaborador", "CCS", "Postes", "KM Ini", "KM Fin", "Justificativa")
-        self.tree = ttk.Treeview(self, columns=colunas, show="headings", height=20)
-        
-        larguras = [80, 150, 100, 60, 60, 60, 150]
-        for col, larg in zip(colunas, larguras):
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=larg, anchor="center")
-
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscroll=scrollbar.set)
-        
-        self.tree.pack(fill="both", expand=True, padx=20, pady=10)
-        scrollbar.place(relx=0.98, rely=0.15, relheight=0.8)
-
-        self.carregar_dados()
-
-    def carregar_dados(self):
-        """Limpa a tabela atual e puxa os dados novos do Excel"""
-        for row in self.tree.get_children():
-            self.tree.delete(row)
-            
+    try:
         df = database.ler_registros()
-        df_recentes = df.tail(100).iloc[::-1] # Mostra os últimos 100 registros
-        
-        for index, row in df_recentes.iterrows():
-            self.tree.insert("", "end", values=(
-                row["Data"], row["Colaborador"], row["Nota CCS"], 
-                row["Qtd Postes"], row["KM Inicial"], row["KM Final"], row["Justificativa"]
-            ))
+
+        if df.empty:
+            st.info("Nenhum registro encontrado ainda. Preencha o Lançador Rápido.")
+        else:
+            # Inverte a ordem para os mais recentes ficarem no topo (opcional)
+            df_exibicao = df.iloc[::-1].reset_index(drop=True)
+            
+            # Mostra a tabela interativa (permite ordenar, buscar e baixar CSV)
+            st.dataframe(df_exibicao, use_container_width=True)
+
+            # Cartões de Resumo Rápido
+            st.divider()
+            st.subheader("Resumo Global")
+            col1, col2 = st.columns(2)
+            with col1:
+                total_postes = df["Qtd Postes"].sum()
+                st.metric("Total de Postes Instalados", f"{total_postes} PGS")
+            with col2:
+                total_lancamentos = len(df)
+                st.metric("Lançamentos Registrados", total_lancamentos)
+
+    except Exception as e:
+        st.error(f"Erro ao carregar o banco de dados: {e}")
