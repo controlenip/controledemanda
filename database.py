@@ -4,7 +4,7 @@ import os
 ARQUIVO_DADOS = "Controle_Produtividade_NIP.xlsx"
 
 def iniciar_banco():
-    """Cria a planilha se ela não existir com as colunas base."""
+    """Cria a planilha de banco de dados se ela não existir."""
     if not os.path.exists(ARQUIVO_DADOS):
         df = pd.DataFrame(columns=[
             "Data", "Colaborador", "Nota CCS", "Qtd Postes", 
@@ -13,13 +13,13 @@ def iniciar_banco():
         df.to_excel(ARQUIVO_DADOS, index=False)
 
 def salvar_registro(novo_dado):
-    """Salva um novo dicionário de dados como uma nova linha no Excel."""
+    """Adiciona um novo registro na planilha Excel."""
     iniciar_banco()
     df = pd.read_excel(ARQUIVO_DADOS)
     df = pd.concat([df, pd.DataFrame([novo_dado])], ignore_index=True)
     df.to_excel(ARQUIVO_DADOS, index=False)
 
 def ler_registros():
-    """Retorna os dados do Excel como um DataFrame do Pandas."""
+    """Lê os dados do Excel e retorna como DataFrame."""
     iniciar_banco()
     return pd.read_excel(ARQUIVO_DADOS)
