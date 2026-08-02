@@ -1,47 +1,37 @@
 import streamlit as st
-from PIL import Image
-import os
 
-# Configuração Base (Deve ser o 1º comando Streamlit do script)
-st.set_page_config(page_title="Gestão de Produtividade NIP", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Gestão NIP", layout="wide", page_icon="⚡")
 
-# Importação dos módulos que criamos
+# Código CSS para ocultar o botão de zoom (fullscreen) das imagens
+st.markdown("""
+    <style>
+        button[title="View fullscreen"] { display: none; }
+    </style>
+""", unsafe_allow_html=True)
+
+# Importação dos módulos (páginas)
 from aba_lancador import render_lancador
-from aba_produtividade import render_produtividade
+from aba_metas import render_metas
+from aba_graficos import render_graficos
 
-# --- Cabeçalho e Logo ---
-col1, col2 = st.columns([1, 4])
-with col1:
-    try:
-        logo = Image.open("LOGO_NIP.png")
-        st.image(logo, use_column_width=True)
-    except FileNotFoundError:
-        st.write("**(LOGO NIP)**")
-with col2:
-    st.title("Sistema de Gestão de Produtividade")
-    st.subheader("NIP | Grupo Igneo")
+# --- Configuração do Menu Lateral ---
+with st.sidebar:
+    # A logo agora fica na lateral, dimensionada perfeitamente
+    st.image("LOGO_NIP.png", width=220)
+    st.divider()
+    
+    st.title("📍 Menu de Navegação")
+    menu = st.radio(
+        "Selecione o módulo:",
+        ["1. Lançamento Diário", "2. Obras e Metas Preditivas", "3. Gráficos de Produção"]
+    )
 
-st.divider()
+st.header("Análise Preditiva de Produtividade | NIP Grupo Igneo")
 
-# --- Sistema de Navegação (Abas) ---
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📝 Lançador Rápido", 
-    "📊 Produtividade", 
-    "⚙️ Parâmetros", 
-    "📈 Dashboard Executivo"
-])
-
-# Rendeziando o conteúdo de cada arquivo na sua respectiva aba
-with tab1:
+# Controle de Exibição
+if menu == "1. Lançamento Diário":
     render_lancador()
-
-with tab2:
-    render_produtividade()
-
-with tab3:
-    st.header("⚙️ Parâmetros")
-    st.info("Aba de Configurações e Parâmetros em Desenvolvimento...")
-
-with tab4:
-    st.header("📈 Dashboard Executivo")
-    st.info("Gráficos do Dashboard em Desenvolvimento...")
+elif menu == "2. Obras e Metas Preditivas":
+    render_metas()
+elif menu == "3. Gráficos de Produção":
+    render_graficos()
