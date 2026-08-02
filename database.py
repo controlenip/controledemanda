@@ -5,22 +5,24 @@ ARQUIVO_DADOS = "Produtividade_Levantadores_NIP.xlsx"
 ARQUIVO_EQUIPES = "Equipes_Gerenciadas.xlsx"
 
 def iniciar_bancos():
-    # 1. Inicia Banco de Produtividade
+    # 1. Inicia Banco de Produtividade com as novas colunas
     if not os.path.exists(ARQUIVO_DADOS):
-        df = pd.DataFrame(columns=["Data", "Levantador", "Quantidade Obras", "Justificativa"])
+        df = pd.DataFrame(columns=[
+            "Data", "Levantador", "Quantidade Obras", 
+            "Nota CCS", "PGS", "KM Inicial", "KM Final", 
+            "Status Levantamento", "Justificativa", "Motivo Outros"
+        ])
         df.to_excel(ARQUIVO_DADOS, index=False)
         
-    # 2. Inicia Banco de Equipes (Puxando a sua planilha fixa como base)
+    # 2. Inicia Banco de Equipes
     if not os.path.exists(ARQUIVO_EQUIPES):
         if os.path.exists("equipes de campo.xlsx"):
-            # Importa do seu arquivo Excel anexado
             df_eq = pd.read_excel("equipes de campo.xlsx", sheet_name="Planilha1")
             df_eq = df_eq[['EQUIPE', 'COLABORADOR']].dropna()
         else:
             df_eq = pd.DataFrame(columns=["EQUIPE", "COLABORADOR"])
         df_eq.to_excel(ARQUIVO_EQUIPES, index=False)
 
-# ---- Funções de Produtividade ----
 def salvar_registro(novo_dado):
     iniciar_bancos()
     df = pd.read_excel(ARQUIVO_DADOS)
@@ -33,7 +35,6 @@ def ler_registros():
     df['Data'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
     return df
 
-# ---- Funções de Gestão de Equipes ----
 def ler_equipes_df():
     iniciar_bancos()
     return pd.read_excel(ARQUIVO_EQUIPES)
