@@ -2,28 +2,48 @@ import pandas as pd
 import os
 
 ARQUIVO_DADOS = "Produtividade_Levantadores_NIP.xlsx"
+ARQUIVO_EQUIPES = "Equipes_Gerenciadas.xlsx"
 
-# Lista Base de Colaboradores (Você pode alterar os nomes depois)
-LEVANTADORES_BASE = ["Levantador 01", "Levantador 02", "Levantador 03", "Levantador 04", "Levantador 05"]
-
-# Gerando automaticamente 10 espaços para Apoio
-LEVANTADORES_APOIO = [f"Apoio {i:02d}" for i in range(1, 11)]
-TODOS_LEVANTADORES = LEVANTADORES_BASE + LEVANTADORES_APOIO
-
-def iniciar_banco():
+def iniciar_bancos():
+    # 1. Inicia Banco de Produtividade
     if not os.path.exists(ARQUIVO_DADOS):
         df = pd.DataFrame(columns=["Data", "Levantador", "Quantidade Obras", "Justificativa"])
         df.to_excel(ARQUIVO_DADOS, index=False)
+        
+    # 2. Inicia Banco de Equipes (Puxando a sua planilha fixa como base)
+    if not os.path.exists(ARQUIVO_EQUIPES):
+        if os.path.exists("equipes de campo.xlsx"):
+            # Importa do seu arquivo Excel anexado
+            df_eq = pd.read_excel("equipes de campo.xlsx", sheet_name="Planilha1")
+            df_eq = df_eq[['EQUIPE', 'COLABORADOR']].dropna()
+        else:
+            df_eq = pd.DataFrame(columns=["EQUIPE", "COLABORADOR"])
+        df_eq.to_excel(ARQUIVO_EQUIPES, index=False)
 
+# ---- Funções de Produtividade ----
 def salvar_registro(novo_dado):
-    iniciar_banco()
+    iniciar_bancos()
     df = pd.read_excel(ARQUIVO_DADOS)
     df = pd.concat([df, pd.DataFrame([novo_dado])], ignore_index=True)
     df.to_excel(ARQUIVO_DADOS, index=False)
 
 def ler_registros():
-    iniciar_banco()
+    iniciar_bancos()
     df = pd.read_excel(ARQUIVO_DADOS)
-    # Garante que a coluna de data seja lida como data pelo sistema
     df['Data'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
     return df
+
+# ---- Funções de Gestão de Equipes ----
+def ler_equipes_df():
+    iniciar_bancos()
+    return pd.read_excel(ARQUIVO_EQUIPES)
+
+def salvar_equipes_df(df):
+    df.to_excel(ARQUIVO_EQUIPES, index=False)
+
+def get_lista_levantadores():
+    df = ler_equipes_df()
+    lista = []
+    for _, row in df.iterrows():
+        lista.append(f"{row['EQUIPE']} - {row['COLABORADOR']}")
+    return lista
