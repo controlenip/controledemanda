@@ -25,14 +25,14 @@ def render_obras():
             
             if novo_arquivo:
                 if st.button("🚀 Confirmar Substituição da Base", type="primary", use_container_width=True):
-                    with open(ARQUIVO_BASE, "wb") as f:
-                        f.write(novo_arquivo.getbuffer())
-                    # Remove a data.xlsx antiga se existir para evitar conflitos
-                    if os.path.exists(ARQUIVO_ALTERNATIVO) and ARQUIVO_BASE != ARQUIVO_ALTERNATIVO:
-                        os.remove(ARQUIVO_ALTERNATIVO)
-                    st.success("✅ Base atualizada com sucesso!")
-                    if hasattr(st, "rerun"): st.rerun()
-                    else: st.experimental_rerun()
+                    with st.spinner("Atualizando base..."):
+                        with open(ARQUIVO_BASE, "wb") as f:
+                            f.write(novo_arquivo.getbuffer())
+                        if os.path.exists(ARQUIVO_ALTERNATIVO) and ARQUIVO_BASE != ARQUIVO_ALTERNATIVO:
+                            os.remove(ARQUIVO_ALTERNATIVO)
+                        st.success("✅ Base atualizada com sucesso!")
+                        if hasattr(st, "rerun"): st.rerun()
+                        else: st.experimental_rerun()
 
         with c2:
             st.markdown("**🗑️ Apagar Base de Dados**")
@@ -80,7 +80,6 @@ def render_obras():
         f_col1, f_col2 = st.columns(2)
         with f_col1:
             if col_ccs and not df[col_ccs].empty:
-                # Limpa e formata as notas disponíveis na base (mesma lógica do aba_lancador)
                 notas_disponiveis = pd.to_numeric(df[col_ccs], errors='coerce').dropna().astype('Int64').astype(str).unique().tolist()
                 pesquisa_ccs = st.multiselect("🔍 Buscar por NOTA CCS (Pesquise e Selecione várias):", options=notas_disponiveis)
             else:
@@ -114,7 +113,6 @@ def render_obras():
         df_filtrado = df.copy()
         
         if pesquisa_ccs:
-            # Aplica a verificação de seleção múltipla (se a obra está dentro das CCS selecionadas)
             ccs_serie = pd.to_numeric(df_filtrado[col_ccs], errors='coerce').fillna(0).astype('Int64').astype(str)
             df_filtrado = df_filtrado[ccs_serie.isin(pesquisa_ccs)]
             
@@ -125,24 +123,46 @@ def render_obras():
         if filtro_mun != "Todos os Municípios" and col_mun:
             df_filtrado = df_filtrado[df_filtrado[col_mun].astype(str) == filtro_mun]
             
-        # --- EXIBIÇÃO DA TABELA E EXPORTAÇÃO ---
+        # --- EXIBIÇÃO DA TABELA INTERATIVA EDITÁVEL ---
         st.write(f"Mostrando **{len(df_filtrado):,}** registros de um total de **{len(df):,}** obras na base.".replace(",", "."))
+        st.info("💡 **Dica de Edição:** Dê um clique duplo em qualquer célula da tabela para editá-la. Ao terminar as alterações, clique no botão de salvar logo abaixo da tabela!")
         
-        st.dataframe(
+        # A MÁGICA ACONTECE AQUI: st.data_editor substitui o st.dataframe
+        df_editado = st.data_editor(
             df_filtrado,
             use_container_width=True,
             hide_index=True,
-            height=500 
+            height=500,
+            key="editor_base_mestra"
         )
         
-        csv_export = df_filtrado.to_csv(index=False, sep=";").encode('utf-8-sig')
-        st.download_button(
-            label="📥 Baixar Resultado do Filtro (CSV)",
-            data=csv_export,
-            file_name="Relatorio_Obras_Filtradas.csv",
-            mime="text/csv",
-            type="secondary"
-        )
+        # --- BOTÕES DE AÇÃO: SALVAR E EXPORTAR ---
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if st.button("💾 Salvar Edições na Base Mestra", type="primary", use_container_width=True):
+                with st.spinner("Gravando alterações no arquivo..."):
+                    try:
+                        # Atualiza apenas as linhas que estavam no filtro dentro do arquivo original
+                        df.loc[df_editado.index, :] = df_editado[:]
+                        
+                        # Salva o dataframe original completo de volta no Excel
+                        df.to_excel(arquivo_ativo, index=False)
+                        st.success("✅ As alterações foram salvas definitivamente na base de dados!")
+                        
+                    except Exception as e:
+                        st.error(f"Erro ao tentar salvar as edições: {e}")
+
+        with col_btn2:
+            csv_export = df_editado.to_csv(index=False, sep=";").encode('utf-8-sig')
+            st.download_button(
+                label="📥 Baixar Tabela Atual (CSV)",
+                data=csv_export,
+                file_name="Relatorio_Obras_Atualizado.csv",
+                mime="text/csv",
+                type="secondary",
+                use_container_width=True
+            )
         
     except Exception as e:
         st.error(f"Erro ao ler a base de dados: {e}")
