@@ -9,7 +9,12 @@ def carregar_notas_ccs():
     if os.path.exists(arquivo):
         try:
             df_obras = pd.read_excel(arquivo)
-            col_ccs = "Nota CCS" if "Nota CCS" in df_obras.columns else df_obras.columns[0]
+            
+            # Busca inteligente da coluna NOTA CCS ignorando maiúsculas/minúsculas
+            col_ccs = next((c for c in df_obras.columns if "NOTA CCS" in str(c).upper().replace("_", " ")), None)
+            if not col_ccs:
+                col_ccs = next((c for c in df_obras.columns if "CCS" in str(c).upper() and "STATUS" not in str(c).upper()), df_obras.columns[1])
+                
             valores_ccs = pd.to_numeric(df_obras[col_ccs], errors='coerce').dropna().astype('Int64').astype(str)
             return valores_ccs.unique().tolist()
         except:
