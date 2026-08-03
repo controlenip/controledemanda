@@ -1,22 +1,43 @@
 import pandas as pd
 import os
+import shutil
+import datetime
 
 ARQUIVO_DADOS = "Produtividade_Levantadores_NIP.xlsx"
 ARQUIVO_EQUIPES = "Equipes_Gerenciadas.xlsx"
 
+def rotina_backup():
+    """Cria uma cópia de segurança dos dados diariamente no primeiro acesso do dia."""
+    pasta_backup = "backups"
+    if not os.path.exists(pasta_backup):
+        os.makedirs(pasta_backup)
+        
+    hoje = datetime.date.today().strftime("%d_%m_%Y")
+    arquivos_alvo = [ARQUIVO_DADOS, ARQUIVO_EQUIPES, "data_2.xlsx", "data.xlsx"]
+    
+    for arquivo in arquivos_alvo:
+        if os.path.exists(arquivo):
+            nome_backup = os.path.join(pasta_backup, f"backup_{hoje}_{arquivo}")
+            # Se o backup do dia ainda não existir, ele cria silenciosamente
+            if not os.path.exists(nome_backup):
+                try:
+                    shutil.copy2(arquivo, nome_backup)
+                except:
+                    pass
+
 def _sanitizar_df(df):
-    """Garante que colunas de texto/objeto não tenham tipos mistos (int + str) para evitar erro no PyArrow."""
+    """Garante que colunas de texto/objeto não tenham tipos mistos (int + str)."""
     if df is None or df.empty:
         return df
     for col in df.columns:
-        # Se a coluna contiver objetos/textos, converte para string evitando NaN problemáticos
         if df[col].dtype == 'object':
             df[col] = df[col].fillna("").astype(str)
-            # Remove '.0' indesejado se números foram salvos como float/str
             df[col] = df[col].apply(lambda x: x[:-2] if x.endswith('.0') else x)
     return df
 
 def iniciar_bancos():
+    rotina_backup() # Aciona o backup de segurança ao iniciar o sistema
+    
     if not os.path.exists(ARQUIVO_DADOS):
         df = pd.DataFrame(columns=[
             "DATA_LEVANTAMENTO", "Levantador", "Quantidade Obras", 
@@ -29,7 +50,6 @@ def iniciar_bancos():
         if os.path.exists("equipes de campo.xlsx"):
             try:
                 df_eq = pd.read_excel("equipes de campo.xlsx", sheet_name="Planilha1")
-                # Padroniza possíveis variações de nomes de colunas
                 df_eq.columns = [c.upper().strip() for c in df_eq.columns]
                 col_equipe = next((c for c in df_eq.columns if "EQUIPE" in c), df_eq.columns[0])
                 col_colab = next((c for c in df_eq.columns if any(k in c for k in ["COLABORADOR", "NOME", "LEVANTADOR"])), df_eq.columns[1] if len(df_eq.columns) > 1 else df_eq.columns[0])
@@ -43,6 +63,29 @@ def iniciar_bancos():
         
         df_eq = _sanitizar_df(df_eq)
         df_eq.to_excel(ARQUIVO_EQUIPES, index=False)
+
+def verificar_obras_finalizadas(notas_str):
+    """Verifica se alguma Nota CCS já foi lançada como FINALIZADA no histórico."""
+    iniciar_bancos()
+    try:
+        df = pd.read_excel(ARQUIVO_DADOS)
+        df = _sanitizar_df(df)
+        notas_lista = [n.strip() for n in notas_str.split(",") if n.strip()]
+        
+        obras_duplicadas = []
+        for _, row in df.iterrows():
+            if str(row.get('Status Levantamento', '')).upper() == "LEVANTAMENTO FINALIZADO":
+                notas_row = [n.strip() for n in str(row.get('Nota CCS', '')).split(',')]
+                for n in notas_lista:
+                    if n in notas_row:
+                        obras_duplicadas.append({
+                            'nota': n,
+                            'levantador': row.get('Levantador', 'Desconhecido'),
+                            'data': str(row.get('DATA_LEVANTAMENTO', ''))
+                        })
+        return obras_duplicadas
+    except:
+        return []
 
 def salvar_registro(novo_dado):
     iniciar_bancos()
@@ -84,7 +127,10 @@ def atualizar_obra_na_base(notas_ccs_str, levantador, data_levantamento, pgs, st
             df_obras = pd.read_excel(arquivo_base)
             df_obras = _sanitizar_df(df_obras)
             
-            col_ccs = "Nota CCS" if "Nota CCS" in df_obras.columns else df_obras.columns[0]
+            col_ccs = next((c for c in df_obras.columns if "NOTA CCS" in str(c).upper().replace("_", " ")), None)
+            if not col_ccs:
+                col_ccs = next((c for c in df_obras.columns if "CCS" in str(c).upper() and "STATUS" not in str(c).upper()), df_obras.columns[1])
+            
             col_lev = next((c for c in df_obras.columns if "LEVANTADOR" in str(c).upper()), "LEVANTADOR")
             col_data = next((c for c in df_obras.columns if "DATA_LEVANTAMENTO" in str(c).upper()), "DATA_LEVANTAMENTO")
             col_pgs = next((c for c in df_obras.columns if "PGS" in str(c).upper()), "PGS")
