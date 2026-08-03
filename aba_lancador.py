@@ -9,8 +9,6 @@ def carregar_notas_ccs():
     if os.path.exists(arquivo):
         try:
             df_obras = pd.read_excel(arquivo)
-            
-            # Busca inteligente da coluna NOTA CCS ignorando maiúsculas/minúsculas
             col_ccs = next((c for c in df_obras.columns if "NOTA CCS" in str(c).upper().replace("_", " ")), None)
             if not col_ccs:
                 col_ccs = next((c for c in df_obras.columns if "CCS" in str(c).upper() and "STATUS" not in str(c).upper()), df_obras.columns[1])
@@ -76,7 +74,18 @@ def render_lancador():
     if justificativa == "Outros": motivo_outros = st.text_input("Especifique o motivo detalhadamente:", key="outros_input")
         
     if st.button("💾 SALVAR PRODUÇÃO DIÁRIA", type="primary", use_container_width=True):
-        # Validação Anti-Erros
+        
+        # 🛡️ TRAVA ANTI-RETRABALHO (Evita Lançar Duplicidade)
+        if nota_ccs_texto and status_lev == "LEVANTAMENTO FINALIZADO":
+            obras_duplicadas = database.verificar_obras_finalizadas(nota_ccs_texto)
+            if obras_duplicadas:
+                st.error("🚨 **ALERTA DE RETRABALHO BLOQUEADO!** As seguintes obras já constam como FINALIZADAS no sistema:")
+                for dup in obras_duplicadas:
+                    st.warning(f"**Nota CCS:** {dup['nota']} | **Finalizada por:** {dup['levantador']} | **Data:** {dup['data'][:10]}")
+                st.error("Verifique a seleção de obras. Não é possível salvar registros duplicados.")
+                return # Bloqueia o processo de salvar
+        
+        # Validação Anti-Erros de KM
         if km_final > 0 and km_inicial > 0 and km_final < km_inicial:
             st.error("⚠️ Validação Anti-Erros: O KM Final não pode ser menor que o KM Inicial!")
             return
