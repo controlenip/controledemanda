@@ -1,42 +1,22 @@
 import pandas as pd
 import os
-import shutil
-import datetime
 
 ARQUIVO_DADOS = "Produtividade_Levantadores_NIP.xlsx"
 ARQUIVO_EQUIPES = "Equipes_Gerenciadas.xlsx"
 
-def rotina_backup():
-    """Cria uma cópia de segurança dos dados diariamente no primeiro acesso do dia."""
-    pasta_backup = "backups"
-    if not os.path.exists(pasta_backup):
-        os.makedirs(pasta_backup)
-        
-    hoje = datetime.date.today().strftime("%d_%m_%Y")
-    arquivos_alvo = [ARQUIVO_DADOS, ARQUIVO_EQUIPES, "data_2.xlsx", "data.xlsx"]
-    
-    for arquivo in arquivos_alvo:
-        if os.path.exists(arquivo):
-            nome_backup = os.path.join(pasta_backup, f"backup_{hoje}_{arquivo}")
-            # Se o backup do dia ainda não existir, ele cria silenciosamente
-            if not os.path.exists(nome_backup):
-                try:
-                    shutil.copy2(arquivo, nome_backup)
-                except:
-                    pass
-
 def _sanitizar_df(df):
-    """Garante que colunas de texto/objeto não tenham tipos mistos (int + str)."""
+    """Higieniza a base de dados de forma vetorizada (Ultra-rápido) e previne crash do PyArrow."""
     if df is None or df.empty:
         return df
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].fillna("").astype(str)
-            df[col] = df[col].apply(lambda x: x[:-2] if x.endswith('.0') else x)
+            # Remove o '.0' de forma vetorizada para processar milhares de linhas em milissegundos
+            df[col] = df[col].str.replace(r'\.0$', '', regex=True)
     return df
 
 def iniciar_bancos():
-    rotina_backup() # Aciona o backup de segurança ao iniciar o sistema
+    # ROTINA DE BACKUP REMOVIDA DAQUI PARA EVITAR O LOOP INFINITO DE REINICIALIZAÇÃO DO STREAMLIT
     
     if not os.path.exists(ARQUIVO_DADOS):
         df = pd.DataFrame(columns=[
@@ -65,7 +45,6 @@ def iniciar_bancos():
         df_eq.to_excel(ARQUIVO_EQUIPES, index=False)
 
 def verificar_obras_finalizadas(notas_str):
-    """Verifica se alguma Nota CCS já foi lançada como FINALIZADA no histórico."""
     iniciar_bancos()
     try:
         df = pd.read_excel(ARQUIVO_DADOS)
