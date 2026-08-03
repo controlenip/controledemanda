@@ -3,8 +3,9 @@ import pandas as pd
 import os
 import database
 
-@st.cache_data
-def carregar_notas_ccs():
+# Cache renovado para forçar a quebra do travamento
+@st.cache_data(ttl=3600)
+def carregar_notas_ccs_v2():
     arquivo = "data_2.xlsx" if os.path.exists("data_2.xlsx") else "data.xlsx"
     if os.path.exists(arquivo):
         try:
@@ -39,7 +40,7 @@ def render_lancador():
     qtd_obras = st.number_input("Quantidade de Obras Realizadas no Dia:", min_value=0, step=1, key="qtd_obras_input")
     
     nota_ccs_texto, pgs, km_inicial, km_final, status_lev = "", 0, 0, 0, ""
-    notas_ccs_disponiveis = carregar_notas_ccs()
+    notas_ccs_disponiveis = carregar_notas_ccs_v2()
     
     if qtd_obras > 0:
         st.info("💡 Campos adicionais habilitados! Digite os números na caixa abaixo para buscar as obras.")
@@ -83,7 +84,7 @@ def render_lancador():
                 for dup in obras_duplicadas:
                     st.warning(f"**Nota CCS:** {dup['nota']} | **Finalizada por:** {dup['levantador']} | **Data:** {dup['data'][:10]}")
                 st.error("Verifique a seleção de obras. Não é possível salvar registros duplicados.")
-                return # Bloqueia o processo de salvar
+                return 
         
         # Validação Anti-Erros de KM
         if km_final > 0 and km_inicial > 0 and km_final < km_inicial:
