@@ -17,7 +17,7 @@ def carregar_notas_ccs():
     return []
 
 def render_lancador():
-    st.subheader("📝 Lançamento Manual Inteligente")
+    st.subheader("📝 Lançamento Manual Inteligente (Com Auditoria)")
     
     if "msg_sucesso" in st.session_state:
         st.success(st.session_state.msg_sucesso)
@@ -71,9 +71,18 @@ def render_lancador():
     if justificativa == "Outros": motivo_outros = st.text_input("Especifique o motivo detalhadamente:", key="outros_input")
         
     if st.button("💾 SALVAR PRODUÇÃO DIÁRIA", type="primary", use_container_width=True):
+        # Validação Anti-Erros
+        if km_final > 0 and km_inicial > 0 and km_final < km_inicial:
+            st.error("⚠️ Validação Anti-Erros: O KM Final não pode ser menor que o KM Inicial!")
+            return
+            
         if qtd_obras > 0 and not nota_ccs_texto:
             st.error("⚠️ Selecione pelo menos uma Nota CCS.")
             return
+            
+        km_rodado = km_final - km_inicial
+        if km_rodado > 400 and qtd_obras == 0:
+            st.warning("⚠️ Atenção: Quilometragem informada muito alta sem obras associadas. Verifique os valores.")
             
         novo_dado = {
             "DATA_LEVANTAMENTO": data_lancamento.strftime("%d/%m/%Y"),
@@ -85,7 +94,6 @@ def render_lancador():
         }
         database.salvar_registro(novo_dado)
         
-        # --- ATUALIZA A BASE DE DADOS data_2.xlsx DIRETAMENTE ---
         if nota_ccs_texto:
             database.atualizar_obra_na_base(
                 nota_ccs_texto, levantador, data_lancamento.strftime("%d/%m/%Y"), pgs, status_lev
