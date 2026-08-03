@@ -20,8 +20,14 @@ def render_graficos():
             
         df['DATA_LEVANTAMENTO'] = pd.to_datetime(df['DATA_LEVANTAMENTO'], format='%d/%m/%Y', errors='coerce')
         
-        # Filtro de tempo geral para os gráficos
-        dias_filtro = st.slider("Visualizar últimos (dias):", min_value=7, max_value=90, value=30, step=7)
+        c_sup1, c_sup2 = st.columns(2)
+        with c_sup1:
+            dias_filtro = st.slider("Visualizar últimos (dias):", min_value=7, max_value=90, value=30, step=7)
+        with c_sup2:
+            tipo_metrica = st.radio("Métrica dos Gráficos:", ["Obras Realizadas", "Postes (PGS)"], horizontal=True)
+            
+        col_metrica = 'Quantidade Obras' if tipo_metrica == "Obras Realizadas" else 'PGS'
+        
         data_corte = pd.Timestamp.now().normalize() - pd.Timedelta(days=dias_filtro)
         df_filtrado = df[df['DATA_LEVANTAMENTO'] >= data_corte].copy()
         
@@ -29,72 +35,54 @@ def render_graficos():
             st.warning("Nenhum dado encontrado para o período selecionado.")
             return
 
-        # ==========================================
-        # 1. GRÁFICO DE PRODUÇÃO DIÁRIA VS META
-        # ==========================================
-        st.write("### 📊 Produção Diária vs Benchmark de Meta")
-        
-        prod_diaria = df_filtrado.groupby(['DATA_LEVANTAMENTO', 'Levantador'])['Quantidade Obras'].sum().reset_index()
+        st.write(f"### 📊 Produção Diária ({tipo_metrica})")
+        prod_diaria = df_filtrado.groupby(['DATA_LEVANTAMENTO', 'Levantador'])[col_metrica].sum().reset_index()
         
         fig_bar = px.bar(
-            prod_diaria, x='DATA_LEVANTAMENTO', y='Quantidade Obras', color='Levantador',
-            barmode='group', title="Obras Concluídas por Dia (Linha Vermelha = Meta 3.5)",
-            labels={'DATA_LEVANTAMENTO': 'Data', 'Quantidade Obras': 'Obras Feitas'}
+            prod_diaria, x='DATA_LEVANTAMENTO', y=col_metrica, color='Levantador',
+            barmode='group', title=f"Evolução Diária por {tipo_metrica}",
+            labels={'DATA_LEVANTAMENTO': 'Data', col_metrica: tipo_metrica}
         )
-        # Adiciona a Linha de Meta Horizontal
-        fig_bar.add_hline(y=3.5, line_dash="dash", line_color="red", annotation_text="Meta (3.5)")
+        if tipo_metrica == "Obras Realizadas":
+            fig_bar.add_hline(y=3.5, line_dash="dash", line_color="red", annotation_text="Meta (3.5)")
         st.plotly_chart(fig_bar, use_container_width=True)
         
         st.divider()
 
-        # Criando duas colunas para os gráficos inferiores
         col1, col2 = st.columns(2)
         
-        # ==========================================
-        # 2. GRÁFICO DE PARETO (GARGALOS)
-        # ==========================================
         with col1:
-            st.write("### 🚧 Ofensores de Produtividade")
-            st.caption("Motivos informados em dias com menos de 3 obras")
-            
-            # Filtra apenas os dias onde a produção foi menor que 3 e descarta os "Dias Normais"
+            st.write("### 🚧 Ofensor de Produtividade")
+            st.caption("Motivos informados em dias com baixa produção")
             df_abaixo = df_filtrado[(df_filtrado['Quantidade Obras'] < 3) & (df_filtrado['Justificativa'] != 'Nenhuma (Dia Normal)')]
             
             if not df_abaixo.empty:
                 just_counts = df_abaixo['Justificativa'].value_counts().reset_index()
                 just_counts.columns = ['Justificativa', 'Ocorrências']
-                
                 fig_pie = px.pie(just_counts, values='Ocorrências', names='Justificativa', hole=0.4,
                                  color_discrete_sequence=px.colors.sequential.RdBu)
                 st.plotly_chart(fig_pie, use_container_width=True)
             else:
-                st.success("🎉 Nenhuma justificativa de baixa produção registrada no período!")
+                st.success("🎉 Nenhuma justificativa de baixa produção registrada!")
 
-        # ==========================================
-        # 3. MAPA DE CALOR SEMANAL (HEATMAP)
-        # ==========================================
         with col2:
-            st.write("### 🔥 Média de Produção por Dia da Semana")
-            st.caption("Identifique padrões de queda de produtividade (Verde = Bom, Vermelho = Ruim)")
-            
-            # Extrai o dia da semana em português
+            st.write("### 🔥 Média por Dia da Semana")
             dias_traducao = {
                 'Monday': '1. Segunda', 'Tuesday': '2. Terça', 'Wednesday': '3. Quarta',
                 'Thursday': '4. Quinta', 'Friday': '5. Sexta', 'Saturday': '6. Sábado', 'Sunday': '7. Domingo'
             }
             df_filtrado['Dia_Semana'] = df_filtrado['DATA_LEVANTAMENTO'].dt.day_name().map(dias_traducao)
-            
-            heatmap_data = df_filtrado.groupby(['Levantador', 'Dia_Semana'])['Quantidade Obras'].mean().reset_index()
+            heatmap_data = df_filtrado.groupby(['Levantador', 'Dia_Semana'])[col_metrica].mean().reset_index()
             
             if not heatmap_data.empty:
                 fig_heat = px.density_heatmap(
-                    heatmap_data, x='Dia_Semana', y='Levantador', z='Quantidade Obras',
+                    heatmap_data, x='Dia_Semana', y='Levantador', z=col_metrica,
                     color_continuous_scale="RdYlGn", 
-                    labels={'Dia_Semana': 'Dia da Semana', 'Quantidade Obras': 'Média de Obras'}
+                    labels={'Dia_Semana': 'Dia da Semana', col_metrica: f'Média {tipo_metrica}'}
                 )
                 st.plotly_chart(fig_heat, use_container_width=True)
             else:
-                st.info("Dados insuficientes para gerar o mapa de calor.")
+                st.info("Dados insuficientes.")
                 
     except Exception as e:
         st.error(f"Erro ao gerar gráficos: {e}")
