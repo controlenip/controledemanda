@@ -4,7 +4,7 @@ import os
 import datetime
 
 def render_metas():
-    st.subheader("🎯 Obras e Metas Preditivas & ETA")
+    st.subheader("🎯 Obras, Pódio e Metas Preditivas (ETA)")
     
     arquivo_dados = "Produtividade_Levantadores_NIP.xlsx"
     arquivo_base = "data_2.xlsx" if os.path.exists("data_2.xlsx") else "data.xlsx"
@@ -51,7 +51,6 @@ def render_metas():
                 st.info(f"⏳ **Previsão de Término do Lote (ETA):** Restam **{obras_pendentes} obras** pendentes na base. No ritmo atual da equipe (**{ritmo_diario_equipe:.1f} obras/dia**), a previsão de conclusão é para **{data_conclusao_estimada.strftime('%d/%m/%Y')}** (~{dias_restantes_estimados} dias úteis).")
         
         st.divider()
-        st.write(f"### 🚦 Gestão à Vista - Desempenho ({mes_selecionado})")
         
         target_val = 3.5 if "Obras" in metrica_tipo else 15.0
         col_agregada = 'Quantidade Obras' if "Obras" in metrica_tipo else 'PGS'
@@ -64,8 +63,35 @@ def render_metas():
         resumo['Media_Diaria'] = resumo['Total_Prod'] / resumo['Dias_Trabalhados']
         resumo['Projecao_Mensal'] = resumo['Media_Diaria'] * 21
         
+        # ==========================================
+        # 🏆 MÓDULO DE GAMIFICAÇÃO: PÓDIO DO MÊS
+        # ==========================================
+        st.write(f"### 🏆 Pódio do Mês ({mes_selecionado}) - Top Produtividade")
+        st.caption(f"Classificação baseada em volume de {metrica_tipo.split(' ')[0]}")
+        
+        resumo_podio = resumo.sort_values(by='Total_Prod', ascending=False).head(3).reset_index(drop=True)
+        
+        if not resumo_podio.empty:
+            c1, c2, c3 = st.columns(3)
+            medalhas = ["🥇 1º Lugar", "🥈 2º Lugar", "🥉 3º Lugar"]
+            cores = ["#FFD700", "#C0C0C0", "#CD7F32"] # Ouro, Prata, Bronze
+            
+            for i in range(min(3, len(resumo_podio))):
+                with [c1, c2, c3][i]:
+                    st.markdown(f"<h3 style='color: {cores[i]}; margin-bottom: 0px;'>{medalhas[i]}</h3>", unsafe_allow_html=True)
+                    st.markdown(f"**{resumo_podio.iloc[i]['Levantador']}**")
+                    st.write(f"**Total:** {int(resumo_podio.iloc[i]['Total_Prod'])}")
+                    st.caption(f"Média Diária: {resumo_podio.iloc[i]['Media_Diaria']:.1f}")
+            
+            st.divider()
+
+        # ==========================================
+        # GESTÃO À VISTA (Todos os Colaboradores)
+        # ==========================================
+        st.write(f"### 🚦 Gestão à Vista - Painel Completo")
+        
         cols = st.columns(3)
-        for i, row in resumo.iterrows():
+        for i, row in resumo.sort_values(by='Levantador').iterrows():
             with cols[i % 3]:
                 st.markdown(f"**👨‍💻 {row['Levantador']}**")
                 media = row['Media_Diaria']
