@@ -48,15 +48,12 @@ def get_lista_levantadores():
         lista.append(f"{row['EQUIPE']} - {row['COLABORADOR']}")
     return lista
 
-# --- NOVA FUNÇÃO QUE ATUALIZA A BASE data_2.xlsx ---
 def atualizar_obra_na_base(notas_ccs_str, levantador, data_levantamento, pgs, status_lev):
     arquivo_base = "data_2.xlsx" if os.path.exists("data_2.xlsx") else "data.xlsx"
     
     if os.path.exists(arquivo_base):
         try:
             df_obras = pd.read_excel(arquivo_base)
-            
-            # Busca as colunas independente se tiverem espaços extras
             col_ccs = "Nota CCS" if "Nota CCS" in df_obras.columns else df_obras.columns[0]
             col_lev = next((c for c in df_obras.columns if "LEVANTADOR" in str(c).upper()), "LEVANTADOR")
             col_data = next((c for c in df_obras.columns if "DATA_LEVANTAMENTO" in str(c).upper()), "DATA_LEVANTAMENTO")
@@ -69,17 +66,14 @@ def atualizar_obra_na_base(notas_ccs_str, levantador, data_levantamento, pgs, st
             mask = df_ccs_str.isin(notas_lista)
             
             if mask.any():
-                # Garante que as colunas existam
                 for col in [col_lev, col_data, col_pgs, col_status]:
                     if col not in df_obras.columns: df_obras[col] = None
                         
-                # Atualiza os dados na planilha data_2.xlsx
                 df_obras.loc[mask, col_lev] = levantador
                 df_obras.loc[mask, col_data] = data_levantamento
                 df_obras.loc[mask, col_pgs] = pgs
                 df_obras.loc[mask, col_status] = status_lev
                 
-                # Salva no arquivo
                 df_obras.to_excel(arquivo_base, index=False)
         except Exception as e:
             print(f"Erro ao atualizar base de obras: {e}")
