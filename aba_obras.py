@@ -79,7 +79,14 @@ def render_obras():
         # Linha 1 de Filtros
         f_col1, f_col2 = st.columns(2)
         with f_col1:
-            pesquisa_ccs = st.text_input("🔍 Buscar por NOTA CCS (Parte do número):")
+            if col_ccs and not df[col_ccs].empty:
+                # Limpa e formata as notas disponíveis na base (mesma lógica do aba_lancador)
+                notas_disponiveis = pd.to_numeric(df[col_ccs], errors='coerce').dropna().astype('Int64').astype(str).unique().tolist()
+                pesquisa_ccs = st.multiselect("🔍 Buscar por NOTA CCS (Pesquise e Selecione várias):", options=notas_disponiveis)
+            else:
+                pesquisa_ccs = []
+                st.info("Coluna de Nota CCS não detectada.")
+
         with f_col2:
             if col_equipe and not df[col_equipe].empty:
                 lista_equipe = ["Todas as Equipes"] + sorted([x for x in df[col_equipe].dropna().astype(str).unique() if x.strip() != ""])
@@ -107,7 +114,10 @@ def render_obras():
         df_filtrado = df.copy()
         
         if pesquisa_ccs:
-            df_filtrado = df_filtrado[df_filtrado[col_ccs].astype(str).str.contains(pesquisa_ccs.strip(), case=False, na=False)]
+            # Aplica a verificação de seleção múltipla (se a obra está dentro das CCS selecionadas)
+            ccs_serie = pd.to_numeric(df_filtrado[col_ccs], errors='coerce').fillna(0).astype('Int64').astype(str)
+            df_filtrado = df_filtrado[ccs_serie.isin(pesquisa_ccs)]
+            
         if filtro_equipe != "Todas as Equipes" and col_equipe:
             df_filtrado = df_filtrado[df_filtrado[col_equipe].astype(str) == filtro_equipe]
         if filtro_status != "Todos os Status" and col_status:
