@@ -69,54 +69,65 @@ def render_obras():
         # Colunas dinâmicas para organizar perfeitamente os filtros
         c1, c2, c3, c4, c5 = st.columns(5)
         
-        # 1. Filtro: Município
+        # 1. Filtro: Município (Múltipla Seleção)
         col_municipio = next((c for c in df.columns if "MUNICÍPIO" in c.upper() or "MUNICIPIO" in c.upper()), None)
         with c1:
             if col_municipio:
-                opcoes_mun = ["Todos"] + sorted(list(df[col_municipio].dropna().astype(str).unique()))
-                sel_mun = st.selectbox("🏙️ Município", opcoes_mun)
-            else: sel_mun = "Todos"
+                opcoes_mun = sorted(list(df[col_municipio].dropna().astype(str).unique()))
+                sel_mun = st.multiselect("🏙️ Município", opcoes_mun, placeholder="Todos")
+            else: sel_mun = []
 
-        # 2. Filtro: PAT
+        # 2. Filtro: PAT (Múltipla Seleção)
         col_pat = next((c for c in df.columns if "PAT" == c.upper()), None)
         with c2:
             if col_pat:
-                opcoes_pat = ["Todos"] + sorted(list(df[col_pat].dropna().astype(str).unique()))
-                sel_pat = st.selectbox("🏷️ PAT", opcoes_pat)
-            else: sel_pat = "Todos"
+                opcoes_pat = sorted(list(df[col_pat].dropna().astype(str).unique()))
+                sel_pat = st.multiselect("🏷️ PAT", opcoes_pat, placeholder="Todos")
+            else: sel_pat = []
                 
-        # 3. Filtro: Tipo de Projeto (PI)
+        # 3. Filtro: Tipo de Projeto (PI) (Múltipla Seleção)
         col_tipo = next((c for c in df.columns if "TIPO DE PROJETO" in c.upper()), None)
         with c3:
             if col_tipo:
-                opcoes_tipo = ["Todos"] + sorted(list(df[col_tipo].dropna().astype(str).unique()))
-                sel_tipo = st.selectbox("📂 Tipo (PI)", opcoes_tipo)
-            else: sel_tipo = "Todos"
+                opcoes_tipo = sorted(list(df[col_tipo].dropna().astype(str).unique()))
+                sel_tipo = st.multiselect("📂 Tipo (PI)", opcoes_tipo, placeholder="Todos")
+            else: sel_tipo = []
             
-        # 4. Filtro: Regional
+        # 4. Filtro: Regional (Múltipla Seleção)
         col_regional = next((c for c in df.columns if "REGIONAL" in c.upper()), None)
         with c4:
             if col_regional:
-                opcoes_reg = ["Todas"] + sorted(list(df[col_regional].dropna().astype(str).unique()))
-                sel_reg = st.selectbox("📍 Regional", opcoes_reg)
-            else: sel_reg = "Todas"
+                opcoes_reg = sorted(list(df[col_regional].dropna().astype(str).unique()))
+                sel_reg = st.multiselect("📍 Regional", opcoes_reg, placeholder="Todas")
+            else: sel_reg = []
             
-        # 5. Filtro: Levantador
+        # 5. Filtro: Levantador (Múltipla Seleção)
         col_levantador = next((c for c in df.columns if "LEVANTADOR" in c.upper()), None)
         with c5:
             if col_levantador:
-                opcoes_lev = ["Todos"] + sorted(list(df[col_levantador].dropna().astype(str).unique()))
-                sel_lev = st.selectbox("👨‍💻 Levantador", opcoes_lev)
-            else: sel_lev = "Todos"
+                opcoes_lev = sorted(list(df[col_levantador].dropna().astype(str).unique()))
+                sel_lev = st.multiselect("👨‍💻 Levantador", opcoes_lev, placeholder="Todos")
+            else: sel_lev = []
 
 
-        # --- APLICAÇÃO INTELIGENTE DOS FILTROS ---
+        # --- APLICAÇÃO INTELIGENTE DOS FILTROS MÚLTIPLOS ---
         df_filtrado = df.copy()
-        if col_municipio and sel_mun != "Todos": df_filtrado = df_filtrado[df_filtrado[col_municipio].astype(str) == sel_mun]
-        if col_pat and sel_pat != "Todos": df_filtrado = df_filtrado[df_filtrado[col_pat].astype(str) == sel_pat]
-        if col_tipo and sel_tipo != "Todos": df_filtrado = df_filtrado[df_filtrado[col_tipo].astype(str) == sel_tipo]
-        if col_regional and sel_reg != "Todas": df_filtrado = df_filtrado[df_filtrado[col_regional].astype(str) == sel_reg]
-        if col_levantador and sel_lev != "Todos": df_filtrado = df_filtrado[df_filtrado[col_levantador].astype(str) == sel_lev]
+        
+        # Se a lista de seleção não estiver vazia, ele filtra. Se estiver vazia, ignora (mostra todos)
+        if col_municipio and len(sel_mun) > 0: 
+            df_filtrado = df_filtrado[df_filtrado[col_municipio].astype(str).isin(sel_mun)]
+            
+        if col_pat and len(sel_pat) > 0: 
+            df_filtrado = df_filtrado[df_filtrado[col_pat].astype(str).isin(sel_pat)]
+            
+        if col_tipo and len(sel_tipo) > 0: 
+            df_filtrado = df_filtrado[df_filtrado[col_tipo].astype(str).isin(sel_tipo)]
+            
+        if col_regional and len(sel_reg) > 0: 
+            df_filtrado = df_filtrado[df_filtrado[col_regional].astype(str).isin(sel_reg)]
+            
+        if col_levantador and len(sel_lev) > 0: 
+            df_filtrado = df_filtrado[df_filtrado[col_levantador].astype(str).isin(sel_lev)]
             
         st.divider()
         st.metric("📊 Total de Obras Encontradas (Com os filtros aplicados)", len(df_filtrado))
