@@ -30,12 +30,11 @@ def remove_accents(input_str):
 
 @st.cache_data(show_spinner=False)
 def load_base_mapping():
-    """Lê a planilha para descobrir exatamente qual município pertence a qual regional"""
     mun_to_reg = {}
     file_path = "MUNICIPIOS-REGIONAIS.xlsx"
     
     if not os.path.exists(file_path):
-        st.sidebar.error(f"🚨 Planilha '{file_path}' não encontrada! Verifique se ela foi enviada para o GitHub com este nome exato.")
+        st.sidebar.error(f"🚨 Planilha '{file_path}' não encontrada! Verifique o nome.")
     else:
         try:
             df_base = pd.read_excel(file_path)
@@ -47,7 +46,6 @@ def load_base_mapping():
         except Exception as e:
             st.sidebar.error(f"🚨 Erro ao ler a planilha: {e}")
     
-    # Mantendo a lista de contingência
     overrides_centro = [
         'SANTA LUZIA', 'CONCEICAO DO LAGO-ACU', 'CONCEICAO DO LAGO ACU', 
         'PINDARE-MIRIM', 'PINDARE MIRIM', 'OLHO DAGUA DAS CUNHAS', 
@@ -86,7 +84,6 @@ def get_base_geojson():
     return geo_data
 
 def is_point_in_polygon(lon, lat, polygon):
-    """Algoritmo de Ray Casting para descobrir se a coordenada está dentro da cidade"""
     inside = False
     for i in range(len(polygon)):
         p1x, p1y = polygon[i]
@@ -96,7 +93,6 @@ def is_point_in_polygon(lon, lat, polygon):
     return inside
 
 def get_municipio_by_coord(lon, lat, geo_data):
-    """Descobre o município cruzando a coordenada GPS com a fronteira do IBGE"""
     if not geo_data: return "N/A", "N/A"
     for feature in geo_data['features']:
         geom = feature['geometry']
@@ -136,7 +132,6 @@ def extrair_coordenadas_vis(texto_coords):
     return pontos
 
 def ler_kml_para_geojson(caminho_arquivo, cor_hex):
-    """Lê nativamente os arquivos KML estáticos (sem precisar do Geopandas)"""
     if not os.path.exists(caminho_arquivo): return None
     try:
         with open(caminho_arquivo, 'r', encoding='utf-8', errors='ignore') as f:
@@ -149,7 +144,6 @@ def ler_kml_para_geojson(caminho_arquivo, cor_hex):
             name_tag = placemark.find('name')
             nome = name_tag.text.strip() if name_tag is not None and name_tag.text else "Área Demarcada"
             
-            # Tenta buscar detalhes estendidos do IPHAN ou INCRA/IBGE
             for simple_data in placemark.findall('.//SimpleData'):
                 if simple_data.attrib.get('name') in ['nm_municip', 'fase_ti', 'etnia', 'nome']:
                     if simple_data.text: nome += f" | {simple_data.text}"
@@ -178,7 +172,6 @@ def get_kml_cached(path, color):
     return ler_kml_para_geojson(path, color)
 
 def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
-    """Função isolada para permitir o processamento paralelo rápido"""
     dict_cores = {
         'REDE PRIMÁRIA': '#e6194b', 'REDE PRIMARIA': '#e6194b',
         'REDE SECUNDÁRIA': '#4363d8', 'REDE SECUNDARIA': '#4363d8',
@@ -236,7 +229,6 @@ def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
         if name_tag is not None and name_tag.text:
             nome_pasta = name_tag.text.strip().upper()
             if "CEMAR" in nome_pasta or nome_arquivo in nome_pasta: continue
-
             cor_elemento = dict_cores.get(nome_pasta, '#333333')
             
             for placemark in folder.findall('.//Placemark'):
@@ -282,19 +274,16 @@ def processar_e_salvar_kmz_paralelo(arquivos):
     base_map = load_base_mapping()
     geo_data = get_base_geojson()
     novos_processados = 0
-    
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for f in arquivos:
             futures.append(executor.submit(processar_um_kmz, f.name, f.getvalue(), base_map, geo_data))
-        
         for future in futures:
             resultado = future.result()
             if resultado:
                 caminho_db, df_alimentador = resultado
                 df_alimentador.to_pickle(caminho_db)
                 novos_processados += 1
-                
     return novos_processados
 
 @st.cache_data(show_spinner=False)
@@ -307,25 +296,56 @@ def carregar_banco_redes():
     if dfs: return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
+# FUNÇÃO REESCRITA E BLINDADA
 @st.cache_data(show_spinner=False)
 def carregar_obras_concluidas():
-    """Lê a planilha de Obras e filtra apenas aquelas marcadas como Concluída no SISCO"""
     file_path = "BASE_LEVANTAMENTO_ATUALIZADA.xlsx"
     if not os.path.exists(file_path):
-        return None
+        return "Arquivo 'BASE_LEVANTAMENTO_ATUALIZADA.xlsx' não encontrado."
+        
     try:
         df_obras = pd.read_excel(file_path)
-        # Filtra a coluna STATUS SISCO para pegar tudo que contenha 'Conclu'
-        mask = df_obras['STATUS SISCO'].astype(str).str.contains('CONCLU', case=False, na=False)
+        
+        # 1. Encontra a coluna de status ignorando espaços ou erros de digitação
+        status_col = None
+        for col in df_obras.columns:
+            if 'STATUS SISCO' in str(col).upper():
+                status_col = col
+                break
+        if not status_col:
+            return "Erro: Coluna 'STATUS SISCO' não encontrada."
+            
+        # 2. Encontra colunas de Latitude e Longitude dinamicamente
+        lat_col, lon_col = None, None
+        for col in df_obras.columns:
+            if 'LATITUDE' in str(col).upper() or 'LAT' == str(col).upper():
+                lat_col = col
+            if 'LONGITUDE' in str(col).upper() or 'LON' == str(col).upper():
+                lon_col = col
+        if not lat_col or not lon_col:
+            return "Erro: Colunas de Latitude ou Longitude ausentes."
+            
+        # 3. Filtra obras
+        mask = df_obras[status_col].astype(str).str.contains('CONCLU', case=False, na=False)
         df_filtrado = df_obras[mask].copy()
         
-        # Garante que as coordenadas sejam lidas como números e remove as vazias
-        df_filtrado['LATITUDE'] = pd.to_numeric(df_filtrado['LATITUDE'], errors='coerce')
-        df_filtrado['LONGITUDE'] = pd.to_numeric(df_filtrado['LONGITUDE'], errors='coerce')
-        df_filtrado = df_filtrado.dropna(subset=['LATITUDE', 'LONGITUDE'])
+        # 4. Arruma as coordenadas (troca vírgula por ponto)
+        if df_filtrado[lat_col].dtype == object:
+            df_filtrado[lat_col] = df_filtrado[lat_col].astype(str).str.replace(',', '.')
+        if df_filtrado[lon_col].dtype == object:
+            df_filtrado[lon_col] = df_filtrado[lon_col].astype(str).str.replace(',', '.')
+            
+        df_filtrado['LAT_CLEAN'] = pd.to_numeric(df_filtrado[lat_col], errors='coerce')
+        df_filtrado['LON_CLEAN'] = pd.to_numeric(df_filtrado[lon_col], errors='coerce')
+        
+        df_filtrado = df_filtrado.dropna(subset=['LAT_CLEAN', 'LON_CLEAN'])
+        
+        if len(df_filtrado) == 0:
+            return "Nenhuma obra com status Concluído e coordenadas válidas encontrada."
+            
         return df_filtrado
-    except Exception:
-        return None
+    except Exception as e:
+        return f"Erro processando planilha: {str(e)}"
 
 # ==========================================
 # 2. INTERFACE E FILTROS DO SISTEMA
@@ -354,12 +374,9 @@ with st.sidebar:
             for i in range(0, len(arquivos_upados), tamanho_lote):
                 lote_atual = (i // tamanho_lote) + 1
                 lote_arquivos = arquivos_upados[i:i+tamanho_lote]
-                
-                texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes} (3 arquivos por vez para evitar travamentos)...")
+                texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes}...")
                 qtd_total_processados += processar_e_salvar_kmz_paralelo(lote_arquivos)
-                
                 barra_progresso.progress(lote_atual / total_lotes)
-                
                 gc.collect() 
 
             if qtd_total_processados > 0:
@@ -446,8 +463,16 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
     mostrar_obras = st.checkbox("🟢 Obras Concluídas (Raio 100m)", value=False)
-    if mostrar_obras and not os.path.exists("BASE_LEVANTAMENTO_ATUALIZADA.xlsx"):
-        st.sidebar.warning("⚠️ Planilha 'BASE_LEVANTAMENTO_ATUALIZADA.xlsx' não encontrada no GitHub.")
+    
+    # Processamento Inteligente com Alerta de Erro
+    df_obras_mapa = None
+    if mostrar_obras:
+        resultado = carregar_obras_concluidas()
+        if isinstance(resultado, str):
+            st.sidebar.warning(f"⚠️ {resultado}")
+        else:
+            df_obras_mapa = resultado
+            st.sidebar.success(f"✅ {len(df_obras_mapa)} Obras carregadas no mapa!")
             
     st.markdown("---")
     st.markdown("### 🗑️ Gerenciar Malha Local")
@@ -490,22 +515,14 @@ if geo_data_ibge:
         reg_name = feature['properties'].get('REGIONAL', '')
         cor_regiao = feature['properties']['fillColor']
         
-        # Se um município específico for selecionado, apaga tudo e destaca só ele
         if municipios_sel:
-            if reg_mun in municipios_sel:
-                return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
-            else:
-                return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
+            if reg_mun in municipios_sel: return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
+            else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
         
-        # Se uma regional for selecionada, destaca a regional
         elif regioes_sel:
-            if reg_name in regioes_sel:
-                # Borda igual ao preenchimento para criar bloco sólido
-                return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
-            else:
-                return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
+            if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
+            else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
         
-        # Mapa padrão (Estado inteiro colorido unindo os municípios em blocos)
         return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
 
     folium.GeoJson(
@@ -530,13 +547,9 @@ if geo_data_ibge:
             {map_id}.on('zoomend', function() {{
                 if (ibge_layer_{map_id}) {{
                     if ({map_id}.getZoom() > 9) {{
-                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{
-                            {map_id}.removeLayer(ibge_layer_{map_id});
-                        }}
+                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.removeLayer(ibge_layer_{map_id}); }}
                     }} else {{
-                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{
-                            {map_id}.addLayer(ibge_layer_{map_id});
-                        }}
+                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.addLayer(ibge_layer_{map_id}); }}
                     }}
                 }}
             }});
@@ -544,7 +557,6 @@ if geo_data_ibge:
     </script>
     """
     mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
-
 
 if not df.empty:
     df_mapa = df.copy()
@@ -554,8 +566,7 @@ if not df.empty:
 
     mask_camadas = pd.Series(False, index=df_mapa.index)
     for alim in alimentadores_visiveis:
-        if alim in camadas_ativas:
-            mask_camadas = mask_camadas | ((df_mapa['ALIMENTADOR'] == alim) & (df_mapa['TIPO_REDE'].isin(camadas_ativas[alim])))
+        if alim in camadas_ativas: mask_camadas = mask_camadas | ((df_mapa['ALIMENTADOR'] == alim) & (df_mapa['TIPO_REDE'].isin(camadas_ativas[alim])))
     df_mapa = df_mapa[mask_camadas]
 
     df_busca = pd.DataFrame()
@@ -585,10 +596,8 @@ if not df.empty:
             nearest_idx = indices[min_idx_in_pts]
             
             elem_prox = df_mapa.loc[nearest_idx]
-            if elem_prox['TIPO_GEOMETRIA'] == 'Ponto':
-                dist_metros = haversine(busca_lat, busca_lon, elem_prox['COORDS'][0], elem_prox['COORDS'][1]) * 1000
-            else:
-                dist_metros = min([haversine(busca_lat, busca_lon, pt[0], pt[1]) for pt in elem_prox['COORDS']]) * 1000
+            if elem_prox['TIPO_GEOMETRIA'] == 'Ponto': dist_metros = haversine(busca_lat, busca_lon, elem_prox['COORDS'][0], elem_prox['COORDS'][1]) * 1000
+            else: dist_metros = min([haversine(busca_lat, busca_lon, pt[0], pt[1]) for pt in elem_prox['COORDS']]) * 1000
             
             st.sidebar.success(f"🎯 **Alvo mais próximo:** {elem_prox['TIPO_REDE']} ({elem_prox['NOME']}) a {dist_metros:.1f} metros.")
             df_busca = df_mapa.loc[[nearest_idx]]
@@ -620,12 +629,10 @@ if not df.empty:
 
     if features:
         geojson_data = {"type": "FeatureCollection", "features": features}
-        
         def style_fn(feature):
             cor = feature['properties']['COR']
             tipo = feature['properties']['TIPO_REDE']
-            if feature['geometry']['type'] == 'LineString': 
-                return {'color': cor, 'weight': 4 if 'PRIM' in tipo else 3, 'opacity': 0.8}
+            if feature['geometry']['type'] == 'LineString': return {'color': cor, 'weight': 4 if 'PRIM' in tipo else 3, 'opacity': 0.8}
             else: 
                 raio = 6
                 if 'POSTE' in tipo: raio = 6
@@ -640,7 +647,6 @@ if not df.empty:
 
     busca_lats, busca_lons = [], []
     fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
-    
     for _, row in df_busca.iterrows():
         coord_txt = f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}" if row['TIPO_GEOMETRIA'] == 'Ponto' else "Linha de Múltiplos Pontos"
         html_popup = f"""
@@ -655,7 +661,6 @@ if not df.empty:
         </div>
         """
         popup = folium.Popup(html_popup, max_width=350)
-        
         if row['TIPO_GEOMETRIA'] == 'Linha':
             folium.PolyLine(locations=row['COORDS'], color='#FF00FF', weight=8, opacity=1.0, popup=popup, tooltip=f"ALVO ENCONTRADO: {html.escape(str(row['NOME']))}").add_to(fg_busca)
             for pt in row['COORDS']: busca_lats.append(pt[0]); busca_lons.append(pt[1])
@@ -689,105 +694,59 @@ if not df.empty:
 # ==========================================
 if mostrar_quilombos:
     geo_q = get_kml_cached("assets/quilombos.kml", "#ff7f00") # Laranja
-    if geo_q:
-        folium.GeoJson(
-            geo_q, name="Áreas Quilombolas",
-            style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4},
-            tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Quilombo:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")
-        ).add_to(mapa)
+    if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Quilombo:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_indigenas:
     geo_i = get_kml_cached("assets/indigenas.kml", "#2ca02c") # Verde
-    if geo_i:
-        folium.GeoJson(
-            geo_i, name="Terras Indígenas",
-            style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4},
-            tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Terra Indígena:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")
-        ).add_to(mapa)
+    if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Terra Indígena:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_arqueologia:
     geo_a = get_kml_cached("assets/arqueologia.kml", "#1f77b4") # Azul
-    if geo_a:
-        folium.GeoJson(
-            geo_a, name="Sítios Arqueológicos",
-            marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4"),
-            tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Sítio:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")
-        ).add_to(mapa)
+    if geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4"), tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Sítio:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_uc_federal:
     geo_uc_fed = get_kml_cached("assets/uc_federal.kml", "#e6b800") # Amarelo Escuro
-    if geo_uc_fed:
-        folium.GeoJson(
-            geo_uc_fed, name="UC Federal",
-            style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4},
-            tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Federal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")
-        ).add_to(mapa)
+    if geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Federal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_uc_estadual:
     geo_uc_est = get_kml_cached("assets/uc_estadual.kml", "#ffff00") # Amarelo Padrão
-    if geo_uc_est:
-        folium.GeoJson(
-            geo_uc_est, name="UC Estadual",
-            style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4},
-            tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Estadual:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")
-        ).add_to(mapa)
+    if geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Estadual:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_uc_municipal:
     geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70") # Amarelo Claro
-    if geo_uc_mun:
-        folium.GeoJson(
-            geo_uc_mun, name="UC Municipal",
-            style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4},
-            tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")
-        ).add_to(mapa)
+    if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 # Nova camada: Obras concluídas (Raio 100m)
-if mostrar_obras:
-    df_obras = carregar_obras_concluidas()
-    if df_obras is not None and not df_obras.empty:
-        fg_obras = folium.FeatureGroup(name="Obras Concluídas (Raio 100m)", show=True)
-        for _, row in df_obras.iterrows():
-            lat = row['LATITUDE']
-            lon = row['LONGITUDE']
-            protocolo = str(row.get('PROTOCOLO', 'S/N'))
-            municipio = str(row.get('MUNICIPIO', 'S/N'))
-            tipo = str(row.get('TIPO NOTA', 'N/A'))
-            
-            html_popup = f"""
-            <div style="min-width: 200px; font-family: sans-serif;">
-                <h4 style="margin-top: 0; color: #2ca02c; border-bottom: 2px solid #2ca02c; padding-bottom: 5px;">Obra Concluída</h4>
-                <table style="width:100%;">
-                    <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
-                    <tr><td style="color: #555; padding: 2px;"><b>TIPO NOTA:</b></td><td>{html.escape(tipo)}</td></tr>
-                    <tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr>
-                </table>
-            </div>
-            """
-            
-            # Ponto central para referência
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=3,
-                color='black',
-                fill=True,
-                fillColor='black',
-                fillOpacity=1
-            ).add_to(fg_obras)
-            
-            # Raio de proteção/abrangência de exatos 100 metros
-            folium.Circle(
-                location=[lat, lon],
-                radius=100,
-                color='#2ca02c',
-                weight=2,
-                fill=True,
-                fillColor='#2ca02c',
-                fillOpacity=0.35,
-                tooltip=f"Obra Concluída: {html.escape(protocolo)}",
-                popup=folium.Popup(html_popup, max_width=300)
-            ).add_to(fg_obras)
-            
-        fg_obras.add_to(mapa)
+if mostrar_obras and df_obras_mapa is not None:
+    fg_obras = folium.FeatureGroup(name="Obras Concluídas (Raio 100m)", show=True)
+    for _, row in df_obras_mapa.iterrows():
+        lat = row['LAT_CLEAN']
+        lon = row['LON_CLEAN']
+        protocolo = str(row.get('PROTOCOLO', 'S/N'))
+        municipio = str(row.get('MUNICIPIO', 'S/N'))
+        tipo = str(row.get('TIPO NOTA', 'N/A'))
+        
+        html_popup = f"""
+        <div style="min-width: 200px; font-family: sans-serif;">
+            <h4 style="margin-top: 0; color: #2ca02c; border-bottom: 2px solid #2ca02c; padding-bottom: 5px;">Obra Concluída</h4>
+            <table style="width:100%;">
+                <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
+                <tr><td style="color: #555; padding: 2px;"><b>TIPO NOTA:</b></td><td>{html.escape(tipo)}</td></tr>
+                <tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr>
+            </table>
+        </div>
+        """
+        
+        folium.CircleMarker(
+            location=[lat, lon], radius=3, color='black', fill=True, fillColor='black', fillOpacity=1
+        ).add_to(fg_obras)
+        
+        folium.Circle(
+            location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35,
+            tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
+        ).add_to(fg_obras)
+        
+    fg_obras.add_to(mapa)
 
 folium.LayerControl(position='topright').add_to(mapa)
 st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
