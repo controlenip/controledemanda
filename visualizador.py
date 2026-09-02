@@ -37,7 +37,6 @@ def init_db_and_migrate():
                   COORDS TEXT, COR TEXT)''')
     conn.commit()
     
-    # Migração invisível: transforma seus velhos .pkl no novo formato ultrarrápido SQLite
     if os.path.exists("database/redes"):
         pkl_files = [f for f in os.listdir("database/redes") if f.endswith('.pkl')]
         for f in pkl_files:
@@ -46,7 +45,7 @@ def init_db_and_migrate():
                 df_pkl = pd.read_pickle(caminho_pkl)
                 df_pkl['COORDS'] = df_pkl['COORDS'].apply(json.dumps)
                 df_pkl.to_sql('malha', conn, if_exists='append', index=False)
-                os.remove(caminho_pkl) # Apaga o arquivo antigo após migrar
+                os.remove(caminho_pkl)
             except Exception:
                 pass
     conn.close()
@@ -61,12 +60,12 @@ def remove_accents(input_str):
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def latlon_to_xyz(lat, lon):
-    R = 6371000.0 # Raio da Terra em metros
+    R = 6371000.0
     lat_rad, lon_rad = math.radians(lat), math.radians(lon)
     return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0 # Raio da Terra em km
+    R = 6371.0
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
@@ -121,21 +120,6 @@ def is_point_in_polygon(lon, lat, polygon):
         if ((p1y > lat) != (p2y > lat)) and (lon < (p2x - p1x) * (lat - p1y) / (p2y - p1y + 1e-9) + p1x): inside = not inside
     return inside
 
-def get_municipio_by_coord(lon, lat, geo_data):
-    if not geo_data: return "N/A", "N/A"
-    for feature in geo_data['features']:
-        geom = feature['geometry']
-        mun = feature['properties'].get('MUNICIPIO', 'N/A')
-        reg = feature['properties'].get('REGIONAL', 'N/A')
-        if geom['type'] == 'Polygon':
-            for ring in geom['coordinates']:
-                if is_point_in_polygon(lon, lat, ring): return mun, reg
-        elif geom['type'] == 'MultiPolygon':
-            for poly in geom['coordinates']:
-                for ring in poly:
-                    if is_point_in_polygon(lon, lat, ring): return mun, reg
-    return "N/A", "N/A"
-
 def extrair_coordenadas_vis(texto_coords):
     pontos = []
     for coord in texto_coords.strip().split():
@@ -158,9 +142,6 @@ def ler_kml_para_geojson(caminho_arquivo, cor_hex):
         for placemark in root.findall('.//Placemark'):
             name_tag = placemark.find('name')
             nome = name_tag.text.strip() if name_tag is not None and name_tag.text else "Área Demarcada"
-            for simple_data in placemark.findall('.//SimpleData'):
-                if simple_data.attrib.get('name') in ['nm_municip', 'fase_ti', 'etnia', 'nome']:
-                    if simple_data.text: nome += f" | {simple_data.text}"
             for poly in placemark.findall('.//Polygon//coordinates'):
                 if poly.text:
                     coords = []
@@ -205,12 +186,9 @@ def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
         mun_norm = remove_accents(municipio)
         if mun_norm in base_map: regional = base_map[mun_norm]
     if regional == "N/A":
-        reg_match = re.search(r'name=["\'](?:REGIONAL|REGIAO)["\'][^>]*>(.*?)</', conteudo_kml, re.IGNORECASE)
-        if reg_match: regional = reg_match.group(1).strip().upper()
-    if regional == "N/A":
         sigla_match = re.search(r'\[([A-Z]{3})\]', nome_arquivo)
         if sigla_match: regional = sigla_match.group(1)
-    registros_flat, primeira_coord = [], None
+    registros_flat = []
     for folder in root.findall('.//Folder'):
         name_tag = folder.find('name')
         if name_tag is not None and name_tag.text:
@@ -224,22 +202,12 @@ def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
                     if ls.text:
                         coords = extrair_coordenadas_vis(ls.text)
                         if len(coords) > 1:
-                            if not primeira_coord: primeira_coord = coords[0]
                             registros_flat.append({'ALIMENTADOR': nome_arquivo, 'REGIONAL': regional, 'MUNICIPIO': municipio, 'TIPO_GEOMETRIA': 'Linha', 'TIPO_REDE': nome_pasta, 'NOME': nome_elemento, 'COORDS': coords, 'COR': cor_elemento})
                 for pt in placemark.findall('.//Point/coordinates'):
                     if pt.text:
                         coords = extrair_coordenadas_vis(pt.text)
                         if len(coords) > 0:
-                            if not primeira_coord: primeira_coord = coords[0]
                             registros_flat.append({'ALIMENTADOR': nome_arquivo, 'REGIONAL': regional, 'MUNICIPIO': municipio, 'TIPO_GEOMETRIA': 'Ponto', 'TIPO_REDE': nome_pasta, 'NOME': nome_elemento, 'COORDS': coords[0], 'COR': cor_elemento})
-    if municipio == "N/A" and primeira_coord is not None and geo_data is not None:
-        mun_descob, reg_descob = get_municipio_by_coord(primeira_coord[1], primeira_coord[0], geo_data)
-        if mun_descob != "N/A":
-            municipio = mun_descob
-            regional = reg_descob if reg_descob != "N/A" else regional
-            for r in registros_flat:
-                r['MUNICIPIO'] = municipio
-                r['REGIONAL'] = regional
     if registros_flat: return pd.DataFrame(registros_flat)
     return None
 
@@ -263,11 +231,9 @@ def processar_e_salvar_kmz_paralelo(arquivos):
         df_final = pd.concat(df_lote, ignore_index=True)
         conn = sqlite3.connect("database/redes.db")
         c = conn.cursor()
-        # Deleta alimentadores existentes para não duplicar antes de inserir
         alimentadores_inseridos = df_final['ALIMENTADOR'].unique().tolist()
         for alim in alimentadores_inseridos:
             c.execute("DELETE FROM malha WHERE ALIMENTADOR = ?", (alim,))
-        
         df_final.to_sql('malha', conn, if_exists='append', index=False)
         conn.commit()
         conn.close()
@@ -435,7 +401,7 @@ def verificar_areas_da_obra(lat, lon):
     return "<br>".join(encontradas) if encontradas else "Nenhuma restrição"
 
 # ==========================================
-# 3. INTERFACE E FILTROS LATERAIS (AGORA COM EXPANDERS)
+# 3. INTERFACE E FILTROS LATERAIS
 # ==========================================
 with st.sidebar:
     with st.expander("📥 1. Upload de Redes", expanded=False):
@@ -644,12 +610,12 @@ js_draw_loc = """
 """
 mapa.get_root().html.add_child(folium.Element(js_draw_loc))
 
-# Camadas base claras e escuras (CORRIGIDO PARA URL PÚBLICA SEM MARCA D'ÁGUA)
+# Camadas base: Usando o servidor da ESRI para o mapa escuro (Garante zero marca d'água)
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(
-    tiles='https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attr='&copy; OpenStreetMap &copy; CARTO',
+    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    attr='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
     name='Mapa Base (Escuro - Foco em Redes)',
     overlay=False,
     control=True,
@@ -709,7 +675,6 @@ if not df.empty:
         if alim in camadas_ativas: mask_camadas = mask_camadas | ((df_mapa['ALIMENTADOR'] == alim) & (df_mapa['TIPO_REDE'].isin(camadas_ativas[alim])))
     df_mapa = df_mapa[mask_camadas]
 
-    # Prepara a Árvore Matemática para calcular a Rede Elétrica mais próxima das Obras
     grid_pts, grid_info = [], []
     if not df_mapa.empty:
         for idx, row in df_mapa.iterrows():
