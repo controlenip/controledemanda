@@ -465,18 +465,22 @@ if geo_data_ibge:
         reg_mun = feature['properties'].get('MUNICIPIO', '')
         reg_name = feature['properties'].get('REGIONAL', '')
         
+        # Se um município específico for selecionado, apaga tudo e destaca só ele
         if municipios_sel:
             if reg_mun in municipios_sel:
                 return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
             else:
                 return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
+        
+        # Se uma regional for selecionada, destaca a regional e apaga o resto
         elif regioes_sel:
             if reg_name in regioes_sel:
-                return {'fillColor': feature['properties']['fillColor'], 'color': '#000000', 'weight': 1, 'fillOpacity': 0.6}
+                return {'fillColor': feature['properties']['fillColor'], 'color': '#000000', 'weight': 1, 'fillOpacity': 0.8}
             else:
                 return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
         
-        return {'fillColor': feature['properties']['fillColor'], 'color': '#000000', 'weight': 1, 'fillOpacity': 0.5}
+        # Se nenhum filtro for acionado, pinta o estado inteiro 
+        return {'fillColor': feature['properties']['fillColor'], 'color': '#555555', 'weight': 1, 'fillOpacity': 0.8}
 
     folium.GeoJson(
         geo_data_ibge,
