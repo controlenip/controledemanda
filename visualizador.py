@@ -10,7 +10,7 @@ import math
 import requests
 import unicodedata
 import folium
-from folium.plugins import HeatMap
+from folium.plugins import HeatMap, MarkerCluster
 import gc
 from streamlit_folium import st_folium
 import html
@@ -30,7 +30,6 @@ def remove_accents(input_str):
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def latlon_to_xyz(lat, lon):
-    """Converte Latitude e Longitude para coordenadas 3D cartesianas (metros)"""
     R = 6371000.0 # Raio da Terra em metros
     lat_rad, lon_rad = math.radians(lat), math.radians(lon)
     return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
@@ -396,7 +395,6 @@ def carregar_e_cruzar_obras():
 st.markdown("<h2 style='color: #0D256C;'>🗺️ Visualizador Oficial de Malha (Satélite Integrado)</h2>", unsafe_allow_html=True)
 st.markdown("O sistema usa **Inteligência Espacial** para descobrir o município e Scipy para pesquisa instantânea de coordenadas!")
 
-# Organizando a ordem de renderização
 kpi_container = st.empty()
 map_container = st.empty()
 table_container = st.container()
@@ -501,12 +499,13 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
+    mostrar_todas_obras = st.checkbox("📍 TODAS AS OBRAS (Clusters)", value=False)
     mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS (Raio 50m)", value=False)
     mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
     mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
     
     msg_obras, df_concluidas, df_andamento = "OK", None, None
-    if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap:
+    if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras:
         msg_obras, df_concluidas, df_andamento = carregar_e_cruzar_obras()
         if msg_obras != "OK":
             st.sidebar.warning(f"⚠️ {msg_obras}")
@@ -522,11 +521,6 @@ with st.sidebar:
                         df_andamento = df_andamento[mask_data]
 
             qtd_conflitos = df_andamento['CONFLITO'].sum()
-            if mostrar_concluidas:
-                st.sidebar.success(f"🔵 {len(df_concluidas)} Concluídas analisadas")
-            if mostrar_conflitantes:
-                if qtd_conflitos > 0: st.sidebar.error(f"🚨 {qtd_conflitos} CONFLITOS ISOLADOS!")
-                else: st.sidebar.success("🎉 Nenhuma obra em conflito!")
             
     st.markdown("---")
     st.markdown("### 🗑️ Gerenciar Malha Local")
@@ -542,21 +536,30 @@ with st.sidebar:
                 st.rerun()
 
 # ==========================================
-# DASHBOARD DE INDICADORES (KPIs)
+# DASHBOARD DE INDICADORES (KPIs PROFISSIONAIS)
 # ==========================================
+def render_kpi(icone, titulo, valor, cor_borda):
+    return f"""
+    <div style="background-color: white; border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-left: 6px solid {cor_borda}; text-align: left; height: 100%;">
+        <p style="margin: 0; font-size: 14px; color: #666; font-weight: 600;">{icone} {titulo}</p>
+        <p style="margin: 0; font-size: 32px; color: #222; font-weight: 800; padding-top: 5px;">{valor}</p>
+    </div>
+    """
+
 with kpi_container.container():
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("⚡ Alimentadores Mapeados", len(df['ALIMENTADOR'].unique()) if not df.empty else 0)
     
-    if msg_obras == "OK" and df_concluidas is not None:
-        c2.metric("🔵 Obras Concluídas", len(df_concluidas))
-        c3.metric("🟢 Obras em Andamento", len(df_andamento))
-        c4.metric("🚨 Conflitos (50m)", df_andamento['CONFLITO'].sum() if not df_andamento.empty else 0)
-    else:
-        c2.metric("🔵 Obras Concluídas", 0)
-        c3.metric("🟢 Obras em Andamento", 0)
-        c4.metric("🚨 Conflitos (50m)", 0)
-    st.markdown("---")
+    val_alim = len(df['ALIMENTADOR'].unique()) if not df.empty else 0
+    val_conc = len(df_concluidas) if df_concluidas is not None else 0
+    val_anda = len(df_andamento) if df_andamento is not None else 0
+    val_conf = df_andamento['CONFLITO'].sum() if df_andamento is not None else 0
+    
+    c1.markdown(render_kpi("⚡", "ALIMENTADORES MAPEADOS", val_alim, "#808080"), unsafe_allow_html=True)
+    c2.markdown(render_kpi("🔵", "OBRAS CONCLUÍDAS", val_conc, "#1f77b4"), unsafe_allow_html=True)
+    c3.markdown(render_kpi("🟢", "OBRAS EM ANDAMENTO", val_anda, "#2ca02c"), unsafe_allow_html=True)
+    c4.markdown(render_kpi("🚨", "CONFLITOS (50m)", val_conf, "#d62728"), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
 
 # ==========================================
 # 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE)
@@ -580,6 +583,30 @@ if geo_data_ibge:
         return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
 
     folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
+
+    map_id = mapa.get_name()
+    js_zoom_hide = f"""
+    <script>
+        setTimeout(function() {{
+            var ibge_layer_{map_id} = null;
+            {map_id}.eachLayer(function(layer) {{
+                if (layer.options && layer.options.name === 'Divisão IBGE (Maranhão)') {{
+                    ibge_layer_{map_id} = layer;
+                }}
+            }});
+            {map_id}.on('zoomend', function() {{
+                if (ibge_layer_{map_id}) {{
+                    if ({map_id}.getZoom() > 9) {{
+                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.removeLayer(ibge_layer_{map_id}); }}
+                    }} else {{
+                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.addLayer(ibge_layer_{map_id}); }}
+                    }}
+                }}
+            }});
+        }}, 500);
+    </script>
+    """
+    mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
 
 todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
@@ -699,7 +726,7 @@ if mostrar_indigenas:
 # ==========================================
 dados_tabela_conflito = []
 
-if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap) and msg_obras == "OK":
+if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras) and msg_obras == "OK":
     
     if mostrar_heatmap:
         heat_data = []
@@ -711,7 +738,34 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap) and msg_obras
     if df_andamento is not None:
         protocolos_com_conflito = set(df_andamento[df_andamento['CONFLITO']]['PROTOCOLO_CONFLITO'].astype(str))
     
-    # 1. Desenha Obras Concluídas
+    # NOVO: PLOTAGEM DE TODAS AS OBRAS EM CLUSTER
+    if mostrar_todas_obras:
+        cluster_todas = MarkerCluster(name="Todas as Obras (Geral)")
+        
+        # Add Concluidas
+        if df_concluidas is not None:
+            for _, row in df_concluidas.iterrows():
+                lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
+                protocolo = str(row.get('PROTOCOLO', 'S/N'))
+                nome = str(row.get('NOME', 'S/N'))
+                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4;">Obra Concluída</h4><b>PROTOCOLO:</b> {html.escape(protocolo)}<br><b>NOME:</b> {html.escape(nome)}</div>"""
+                folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor='#1f77b4', fillOpacity=0.9, tooltip=f"Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(cluster_todas)
+        
+        # Add Andamento
+        if df_andamento is not None:
+            for _, row in df_andamento.iterrows():
+                lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
+                protocolo = str(row.get('PROTOCOLO', 'S/N'))
+                nome = str(row.get('NOME', 'S/N'))
+                cor = 'red' if row['CONFLITO'] else '#2ca02c'
+                titulo = "Conflito!" if row['CONFLITO'] else "Em Andamento"
+                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor};">{titulo}</h4><b>PROTOCOLO:</b> {html.escape(protocolo)}<br><b>NOME:</b> {html.escape(nome)}</div>"""
+                folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor=cor, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(cluster_todas)
+                
+        cluster_todas.add_to(mapa)
+
+
+    # 1. Desenha Obras Concluídas Isoladas
     if mostrar_concluidas and df_concluidas is not None:
         fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Alvos)", show=True)
         for _, row in df_concluidas.iterrows():
