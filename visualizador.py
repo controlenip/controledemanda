@@ -255,7 +255,6 @@ def carregar_e_cruzar_obras():
         if not all([status_sisco_col, status_list_col, lat_col, lon_col]):
             return "Erro: Colunas obrigatórias ausentes na planilha (Status ou Coordenadas).", None, None, None
             
-        # 🗺️ NORMALIZAÇÃO DE MUNICÍPIO E REGIONAL PARA OS FILTROS LATERAIS
         mun_col = next((c for c in df_obras.columns if 'MUNICIPIO' in str(c).upper() or 'CIDADE' in str(c).upper()), None)
         if mun_col:
             df_obras['MUNICIPIO_NORM'] = df_obras[mun_col].apply(lambda x: remove_accents(str(x)).upper().strip() if pd.notnull(x) else "DESCONHECIDO")
@@ -313,7 +312,6 @@ def carregar_e_cruzar_obras():
         return "OK", df_concluidas, df_andamento, df_invalidas
     except Exception as e: return f"Erro processando dados: {str(e)}", None, None, None
 
-# 🌩️ FUNÇÃO BLINDADA: Buscar Satélite de Chuva ao Vivo (RainViewer API)
 @st.cache_data(ttl=300)
 def obter_radar_chuva_url():
     try:
@@ -435,7 +433,6 @@ with st.sidebar:
         msg_obras, df_concluidas, df_andamento, df_invalidas = carregar_e_cruzar_obras()
         if msg_obras != "OK": st.sidebar.warning(f"⚠️ {msg_obras}")
         else:
-            # ✂️ CORTA AS OBRAS FORA DA REGIONAL/MUNICÍPIO SELECIONADOS ✂️
             if regioes_sel:
                 if df_concluidas is not None and not df_concluidas.empty: df_concluidas = df_concluidas[df_concluidas['REGIONAL_NORM'].isin(regioes_sel)]
                 if df_andamento is not None and not df_andamento.empty: df_andamento = df_andamento[df_andamento['REGIONAL_NORM'].isin(regioes_sel)]
@@ -523,6 +520,61 @@ mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canva
 
 mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
 Draw(export=False, position='topleft').add_to(mapa)
+
+# 🇧🇷 TRADUÇÃO DOS CONTROLES DE DESENHO (DRAW) PARA PORTUGUÊS (PT-BR)
+js_draw_loc = """
+<script>
+    setTimeout(function() {
+        if (typeof L !== 'undefined' && L.drawLocal) {
+            // Tradução do Draw (Desenho)
+            L.drawLocal.draw.toolbar.actions.title = 'Cancelar desenho';
+            L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
+            L.drawLocal.draw.toolbar.finish.title = 'Finalizar desenho';
+            L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
+            L.drawLocal.draw.toolbar.undo.title = 'Desfazer último ponto';
+            L.drawLocal.draw.toolbar.undo.text = 'Desfazer';
+            
+            L.drawLocal.draw.toolbar.buttons.polygon = 'Desenhar um polígono';
+            L.drawLocal.draw.toolbar.buttons.polyline = 'Desenhar uma linha';
+            L.drawLocal.draw.toolbar.buttons.rectangle = 'Desenhar um retângulo';
+            L.drawLocal.draw.toolbar.buttons.circle = 'Desenhar um círculo';
+            L.drawLocal.draw.toolbar.buttons.marker = 'Adicionar um marcador';
+            L.drawLocal.draw.toolbar.buttons.circlemarker = 'Adicionar marcador circular';
+            
+            L.drawLocal.draw.handlers.polygon.tooltip.start = 'Clique para começar a desenhar o polígono.';
+            L.drawLocal.draw.handlers.polygon.tooltip.cont = 'Clique para continuar desenhando.';
+            L.drawLocal.draw.handlers.polygon.tooltip.end = 'Clique no primeiro ponto para fechar o polígono.';
+            
+            L.drawLocal.draw.handlers.polyline.tooltip.start = 'Clique para começar a desenhar a linha.';
+            L.drawLocal.draw.handlers.polyline.tooltip.cont = 'Clique para continuar desenhando.';
+            L.drawLocal.draw.handlers.polyline.tooltip.end = 'Clique no último ponto para finalizar a linha.';
+            
+            L.drawLocal.draw.handlers.rectangle.tooltip.start = 'Clique e arraste para desenhar um retângulo.';
+            L.drawLocal.draw.handlers.circle.tooltip.start = 'Clique e arraste para desenhar um círculo.';
+            L.drawLocal.draw.handlers.marker.tooltip.start = 'Clique no mapa para adicionar o marcador.';
+            L.drawLocal.draw.handlers.circlemarker.tooltip.start = 'Clique no mapa para adicionar o marcador circular.';
+            
+            // Tradução do Edit (Edição/Exclusão)
+            L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
+            L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
+            L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
+            L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
+            L.drawLocal.edit.toolbar.actions.clearAll.title = 'Apagar todos os desenhos';
+            L.drawLocal.edit.toolbar.actions.clearAll.text = 'Apagar Tudo';
+            
+            L.drawLocal.edit.toolbar.buttons.edit = 'Editar desenhos';
+            L.drawLocal.edit.toolbar.buttons.editDisabled = 'Nenhum desenho para editar';
+            L.drawLocal.edit.toolbar.buttons.remove = 'Apagar desenhos';
+            L.drawLocal.edit.toolbar.buttons.removeDisabled = 'Nenhum desenho para apagar';
+            
+            L.drawLocal.edit.handlers.edit.tooltip.text = 'Arraste as alças ou marcadores para editar.';
+            L.drawLocal.edit.handlers.edit.tooltip.subtext = 'Clique em Cancelar para desfazer as alterações.';
+            L.drawLocal.edit.handlers.remove.tooltip.text = 'Clique em um desenho para apagá-lo.';
+        }
+    }, 500);
+</script>
+"""
+mapa.get_root().html.add_child(folium.Element(js_draw_loc))
 
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
@@ -732,8 +784,7 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             cor_concluida = '#1f77b4'
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-            municipio_popup = str(row.get('MUNICIPIO', row.get('MUNICIPIO_NORM', 'S/N')))
-            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio_popup)}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1).add_to(fg_concluidas)
             folium.Circle(location=[lat, lon], radius=50, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
