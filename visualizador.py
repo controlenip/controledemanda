@@ -342,22 +342,31 @@ base_map = load_base_mapping()
 geo_data_ibge = get_base_geojson()
 
 # ==========================================
-# PREPARAÇÃO DAS ÁREAS ESPECIAIS (CARREGAMENTO)
+# PREPARAÇÃO DAS ÁREAS ESPECIAIS (CARREGAMENTO + BOUNDING BOX OTIMIZADO)
 # ==========================================
-geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00")
-geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c")
-geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#1f77b4")
-geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800")
-geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00")
-geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00")
+def preprocessar_bboxes_kml(geo_data):
+    """Cria um quadrado (Bounding Box) matemático em volta da área especial para eliminar cálculos desnecessários e impedir o travamento."""
+    if not geo_data: return
+    for feat in geo_data['features']:
+        geom = feat['geometry']
+        if geom['type'] == 'Polygon':
+            bboxes = []
+            for ring in geom['coordinates']:
+                lons = [pt[0] for pt in ring]
+                lats = [pt[1] for pt in ring]
+                bboxes.append((min(lons), max(lons), min(lats), max(lats)))
+            feat['bboxes'] = bboxes
+
+geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00"); preprocessar_bboxes_kml(geo_q)
+geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c"); preprocessar_bboxes_kml(geo_i)
+geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#1f77b4"); preprocessar_bboxes_kml(geo_a)
+geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800"); preprocessar_bboxes_kml(geo_uc_fed)
+geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_est)
+geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_mun)
 
 dict_areas_especiais = {
-    "Quilombo": geo_q,
-    "Terra Indígena": geo_i,
-    "Sítio Arqueológico": geo_a,
-    "UC Federal": geo_uc_fed,
-    "UC Estadual": geo_uc_est,
-    "UC Municipal": geo_uc_mun
+    "Quilombo": geo_q, "Terra Indígena": geo_i, "Sítio Arqueológico": geo_a,
+    "UC Federal": geo_uc_fed, "UC Estadual": geo_uc_est, "UC Municipal": geo_uc_mun
 }
 
 def verificar_areas_da_obra(lat, lon):
@@ -368,10 +377,13 @@ def verificar_areas_da_obra(lat, lon):
             geom = feat['geometry']
             nome = feat['properties'].get('NOME', 'Sem Nome')
             if geom['type'] == 'Polygon':
-                for ring in geom['coordinates']:
-                    if is_point_in_polygon(lon, lat, ring):
-                        encontradas.append(f"<b>{categoria}:</b> {nome}")
-                        break
+                for i, ring in enumerate(geom['coordinates']):
+                    min_lon, max_lon, min_lat, max_lat = feat['bboxes'][i]
+                    # OTIMIZAÇÃO: Só calcula o polígono se a obra estiver dentro da "caixa" (Milissegundos)
+                    if (min_lon <= lon <= max_lon) and (min_lat <= lat <= max_lat):
+                        if is_point_in_polygon(lon, lat, ring):
+                            encontradas.append(f"<b>{categoria}:</b> {nome}")
+                            break
             elif geom['type'] == 'Point':
                 pt_lon, pt_lat = geom['coordinates']
                 if haversine(lat, lon, pt_lat, pt_lon) * 1000 <= 150:
@@ -460,7 +472,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
     mostrar_todas_obras = st.checkbox("📍 TODAS AS OBRAS (Clusters)", value=False)
-    mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS (Raio 50m)", value=False)
+    mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS", value=False) # Texto simplificado, raio removido
     mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
     mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
     mostrar_clima = st.checkbox("🌦️ Radar Climático (Nuvens e Chuva)", value=False)
@@ -564,14 +576,12 @@ js_draw_loc = """
 <script>
     setTimeout(function() {
         if (typeof L !== 'undefined' && L.drawLocal) {
-            // Tradução do Draw (Desenho)
             L.drawLocal.draw.toolbar.actions.title = 'Cancelar desenho';
             L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
             L.drawLocal.draw.toolbar.finish.title = 'Finalizar desenho';
             L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
             L.drawLocal.draw.toolbar.undo.title = 'Desfazer último ponto';
             L.drawLocal.draw.toolbar.undo.text = 'Desfazer';
-            
             L.drawLocal.draw.toolbar.buttons.polygon = 'Desenhar um polígono';
             L.drawLocal.draw.toolbar.buttons.polyline = 'Desenhar uma linha';
             L.drawLocal.draw.toolbar.buttons.rectangle = 'Desenhar um retângulo';
@@ -579,35 +589,12 @@ js_draw_loc = """
             L.drawLocal.draw.toolbar.buttons.marker = 'Adicionar um marcador';
             L.drawLocal.draw.toolbar.buttons.circlemarker = 'Adicionar marcador circular';
             
-            L.drawLocal.draw.handlers.polygon.tooltip.start = 'Clique para começar a desenhar o polígono.';
-            L.drawLocal.draw.handlers.polygon.tooltip.cont = 'Clique para continuar desenhando.';
-            L.drawLocal.draw.handlers.polygon.tooltip.end = 'Clique no primeiro ponto para fechar o polígono.';
-            
-            L.drawLocal.draw.handlers.polyline.tooltip.start = 'Clique para começar a desenhar a linha.';
-            L.drawLocal.draw.handlers.polyline.tooltip.cont = 'Clique para continuar desenhando.';
-            L.drawLocal.draw.handlers.polyline.tooltip.end = 'Clique no último ponto para finalizar a linha.';
-            
-            L.drawLocal.draw.handlers.rectangle.tooltip.start = 'Clique e arraste para desenhar um retângulo.';
-            L.drawLocal.draw.handlers.circle.tooltip.start = 'Clique e arraste para desenhar um círculo.';
-            L.drawLocal.draw.handlers.marker.tooltip.start = 'Clique no mapa para adicionar o marcador.';
-            L.drawLocal.draw.handlers.circlemarker.tooltip.start = 'Clique no mapa para adicionar o marcador circular.';
-            
-            // Tradução do Edit (Edição/Exclusão)
             L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
             L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
             L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
             L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
             L.drawLocal.edit.toolbar.actions.clearAll.title = 'Apagar todos os desenhos';
             L.drawLocal.edit.toolbar.actions.clearAll.text = 'Apagar Tudo';
-            
-            L.drawLocal.edit.toolbar.buttons.edit = 'Editar desenhos';
-            L.drawLocal.edit.toolbar.buttons.editDisabled = 'Nenhum desenho para editar';
-            L.drawLocal.edit.toolbar.buttons.remove = 'Apagar desenhos';
-            L.drawLocal.edit.toolbar.buttons.removeDisabled = 'Nenhum desenho para apagar';
-            
-            L.drawLocal.edit.handlers.edit.tooltip.text = 'Arraste as alças ou marcadores para editar.';
-            L.drawLocal.edit.handlers.edit.tooltip.subtext = 'Clique em Cancelar para desfazer as alterações.';
-            L.drawLocal.edit.handlers.remove.tooltip.text = 'Clique em um desenho para apagá-lo.';
         }
     }, 500);
 </script>
@@ -786,20 +773,21 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             for _, row in df_concluidas.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
                 sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+                areas_especiais = verificar_areas_da_obra(lat, lon) # Agora roda em milissegundos por causa do BBox
                 
-                # Card Padronizado (Sem verificação pesada para não travar os 7000 pontos)
-                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
                 
                 folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor='#1f77b4', fillOpacity=0.9, tooltip=f"Concluída: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=350)).add_to(cluster_todas)
+        
         if df_andamento is not None:
             for _, row in df_andamento.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
                 cor = 'red' if row['CONFLITO'] else '#2ca02c'
                 titulo = "🚨 CONFLITO!" if row['CONFLITO'] else "🚧 EM ANDAMENTO"
                 sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+                areas_especiais = verificar_areas_da_obra(lat, lon) # Agora roda em milissegundos
                 
-                # Card Padronizado (Sem verificação pesada para não travar os 7000 pontos)
-                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
                 
                 folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor=cor, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=350)).add_to(cluster_todas)
         cluster_todas.add_to(mapa)
@@ -811,19 +799,15 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             cor_concluida = '#1f77b4'
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+            areas_especiais = verificar_areas_da_obra(lat, lon)
             
-            # Card Padronizado (Sem verificação pesada para não travar)
-            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
             
+            # (CORRIGIDO): Raio falso de 50 metros removido. Agora é apenas 1 bolinha azul clicável.
             folium.CircleMarker(
-                location=[lat, lon], radius=5, color='black', weight=1, fill=True, 
+                location=[lat, lon], radius=6, color='black', weight=1, fill=True, 
                 fillColor=cor_concluida, fillOpacity=1, popup=folium.Popup(html_popup, max_width=350),
                 tooltip=f"Obra Concluída: {html.escape(protocolo)}"
-            ).add_to(fg_concluidas)
-            
-            folium.Circle(
-                location=[lat, lon], radius=50, color=cor_concluida, weight=2, 
-                fill=True, fillColor=cor_concluida, fillOpacity=0.15
             ).add_to(fg_concluidas)
             
         fg_concluidas.add_to(mapa)
@@ -837,8 +821,6 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             nome_nova = str(row.get('NOME', 'S/N'))
             nome_alvo = str(row.get('NOME_CONCLUIDA', 'S/N'))
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-            
-            # Aqui a verificação permanece, pois roda poucas vezes e não trava o app
             areas_especiais = verificar_areas_da_obra(lat, lon)
             
             dados_tabela_conflito.append({
@@ -856,9 +838,10 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
 # ==========================================
 # 🌩️ INTEGRAÇÃO DE RADARES EXTERNOS (STREET VIEW E CLIMA)
 # ==========================================
+# (CORRIGIDO): URL encodada (%7C no lugar de |) para que o navegador não quebre e mostre as linhas azuis como no Google.
 if mostrar_streetview:
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=svv&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com/vt/lyrs=svv%7Ccb_client:apiv3&x={x}&y={y}&z={z}',
         attr='Google Maps Street View',
         name='🛣️ Cobertura Street View',
         overlay=True,
