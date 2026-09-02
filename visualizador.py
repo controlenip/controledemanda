@@ -10,6 +10,7 @@ import math
 import requests
 import unicodedata
 import folium
+from folium.plugins import HeatMap
 import gc
 from streamlit_folium import st_folium
 import html
@@ -27,6 +28,21 @@ if not os.path.exists("database/redes"):
 def remove_accents(input_str):
     nfkd_form = unicodedata.normalize('NFKD', str(input_str))
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+def latlon_to_xyz(lat, lon):
+    """Converte Latitude e Longitude para coordenadas 3D cartesianas (metros)"""
+    R = 6371000.0 # Raio da Terra em metros
+    lat_rad, lon_rad = math.radians(lat), math.radians(lon)
+    return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0 # Raio da Terra em km
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2.0)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2.0)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
 
 @st.cache_data(show_spinner=False)
 def load_base_mapping():
@@ -107,15 +123,6 @@ def get_municipio_by_coord(lon, lat, geo_data):
                 for ring in poly:
                     if is_point_in_polygon(lon, lat, ring): return mun, reg
     return "N/A", "N/A"
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = math.sin(dlat/2.0)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2.0)**2
-    c = 2 * math.asin(math.sqrt(a))
-    return R * c
 
 def extrair_coordenadas_vis(texto_coords):
     pontos = []
@@ -345,11 +352,6 @@ def carregar_e_cruzar_obras():
         df_andamento['DISTANCIA_CONFLITO'] = 0.0
         
         if not df_concluidas.empty and not df_andamento.empty:
-            def latlon_to_xyz(lat, lon):
-                R = 6371000.0
-                lat_rad, lon_rad = math.radians(lat), math.radians(lon)
-                return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
-            
             pts_concluidas = [latlon_to_xyz(row['LAT_CLEAN'], row['LON_CLEAN']) for _, row in df_concluidas.iterrows()]
             arvore_kdtree = cKDTree(pts_concluidas)
             
@@ -364,8 +366,8 @@ def carregar_e_cruzar_obras():
                 obra_concluida_proxima = df_concluidas.iloc[idx_mais_proximo]
                 distancia_exata_m = haversine(row['LAT_CLEAN'], row['LON_CLEAN'], obra_concluida_proxima['LAT_CLEAN'], obra_concluida_proxima['LON_CLEAN']) * 1000
                 
-                # RAIO AUMENTADO PARA 150 METROS AQUI
-                if distancia_exata_m <= 150:
+                # RAIO DETECTADO ATUALIZADO PARA 50m
+                if distancia_exata_m <= 50:
                     conflitos_flags.append(True)
                     conflitos_protos.append(str(obra_concluida_proxima.get('PROTOCOLO', 'S/N')))
                     conflitos_dists.append(distancia_exata_m)
@@ -385,11 +387,13 @@ def carregar_e_cruzar_obras():
 
 
 # ==========================================
-# 2. INTERFACE E FILTROS DO SISTEMA
+# 2. ESTRUTURA DA TELA E CONTAINERS
 # ==========================================
 st.markdown("<h2 style='color: #0D256C;'>🗺️ Visualizador Oficial de Malha (Satélite Integrado)</h2>", unsafe_allow_html=True)
 st.markdown("O sistema usa **Inteligência Espacial** para descobrir o município e Scipy para pesquisa instantânea de coordenadas!")
 
+# Organizando a ordem de renderização
+kpi_container = st.empty()
 map_container = st.empty()
 table_container = st.container()
 
@@ -397,16 +401,18 @@ df = carregar_banco_redes()
 base_map = load_base_mapping()
 geo_data_ibge = get_base_geojson()
 
+# ==========================================
+# 3. INTERFACE E FILTROS LATERAIS
+# ==========================================
 with st.sidebar:
-    st.markdown("### 📥 1. Upload de Redes (Em Lotes Seguros)")
-    arquivos_upados = st.file_uploader("Arraste novos KMZs aqui (Sem limite de quantidade)", type=["kmz", "kml"], accept_multiple_files=True)
+    st.markdown("### 📥 1. Upload de Redes")
+    arquivos_upados = st.file_uploader("Arraste novos KMZs aqui", type=["kmz", "kml"], accept_multiple_files=True)
     
     if arquivos_upados:
         if st.button(f"💾 Processar e Salvar {len(arquivos_upados)} Arquivo(s)", type="primary", use_container_width=True):
             qtd_total_processados = 0
             tamanho_lote = 3
             total_lotes = math.ceil(len(arquivos_upados) / tamanho_lote)
-            
             barra_progresso = st.progress(0.0)
             texto_status = st.empty()
             
@@ -424,41 +430,32 @@ with st.sidebar:
                 time.sleep(1.5)
                 st.rerun()
             else:
-                st.info("Nenhum arquivo novo foi processado (já existiam no banco ou inválidos).")
+                st.info("Nenhum arquivo novo foi processado.")
 
     st.markdown("---")
     st.markdown("### 🔎 2. Pesquisas Inteligentes")
     tab_nome, tab_coord = st.tabs(["📝 Por Nome/ID", "📍 Por Coordenada"])
-    
     termo_pesquisa = ""
     busca_lat = None
     busca_lon = None
     
     with tab_nome:
         termo_pesquisa = st.text_input("Nome/Num. Poste ou Trafo:", placeholder="Ex: 554930...").strip().upper()
-        
     with tab_coord:
         c_lat, c_lon = st.columns(2)
-        with c_lat:
-            lat_input = st.text_input("Latitude:", placeholder="Ex: -5.532")
-        with c_lon:
-            lon_input = st.text_input("Longitude:", placeholder="Ex: -47.432")
-            
+        with c_lat: lat_input = st.text_input("Latitude:", placeholder="Ex: -5.532")
+        with c_lon: lon_input = st.text_input("Longitude:", placeholder="Ex: -47.432")
         if lat_input and lon_input:
             try:
                 b_lat = float(lat_input.replace(',', '.').strip())
                 b_lon = float(lon_input.replace(',', '.').strip())
                 if -35.0 <= b_lat <= 5.0 and -75.0 <= b_lon <= -30.0:
-                    busca_lat = b_lat
-                    busca_lon = b_lon
-                else:
-                    st.warning("⚠️ Coordenada fora do Brasil.")
-            except:
-                st.warning("⚠️ Formato inválido. Use números.")
+                    busca_lat, busca_lon = b_lat, b_lon
+                else: st.warning("⚠️ Coordenada fora do Brasil.")
+            except: st.warning("⚠️ Formato inválido.")
 
     st.markdown("---")
     st.markdown("### 🔍 3. Filtros Geográficos")
-    
     lista_regioes = sorted(list(set(base_map.values()))) if base_map else ["CENTRO", "LESTE", "NOROESTE", "NORTE", "SUL"]
     regioes_sel = st.multiselect("📍 Regional:", lista_regioes)
     
@@ -467,7 +464,6 @@ with st.sidebar:
         if not regioes_sel or reg in regioes_sel:
             lista_municipios.append(mun)
     lista_municipios = sorted(lista_municipios)
-    
     municipios_sel = st.multiselect("🏙️ Município (Foco e Contorno):", lista_municipios)
     
     df_filt = df.copy()
@@ -501,24 +497,33 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
-    mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS", value=False)
-    mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES", value=False)
+    mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS (Raio 50m)", value=False)
+    mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
+    mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
     
     msg_obras, df_concluidas, df_andamento = "OK", None, None
-    if mostrar_concluidas or mostrar_conflitantes:
+    if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap:
         msg_obras, df_concluidas, df_andamento = carregar_e_cruzar_obras()
         if msg_obras != "OK":
             st.sidebar.warning(f"⚠️ {msg_obras}")
         else:
+            # FILTRO TEMPORAL NOVO
+            if 'DATA ABERTURA' in df_andamento.columns:
+                df_andamento['DATA ABERTURA_DT'] = pd.to_datetime(df_andamento['DATA ABERTURA'], errors='coerce')
+                min_date = df_andamento['DATA ABERTURA_DT'].dropna().min()
+                max_date = df_andamento['DATA ABERTURA_DT'].dropna().max()
+                if pd.notnull(min_date) and pd.notnull(max_date):
+                    data_filtro = st.date_input("📅 Filtrar Conflitos (Data de Abertura):", [min_date.date(), max_date.date()])
+                    if len(data_filtro) == 2:
+                        mask_data = (df_andamento['DATA ABERTURA_DT'].dt.date >= data_filtro[0]) & (df_andamento['DATA ABERTURA_DT'].dt.date <= data_filtro[1])
+                        df_andamento = df_andamento[mask_data]
+
             qtd_conflitos = df_andamento['CONFLITO'].sum()
-            
             if mostrar_concluidas:
-                st.sidebar.success(f"🔵 {len(df_concluidas)} Concluídas no mapa")
+                st.sidebar.success(f"🔵 {len(df_concluidas)} Concluídas analisadas")
             if mostrar_conflitantes:
-                if qtd_conflitos > 0:
-                    st.sidebar.error(f"🚨 {qtd_conflitos} CONFLITOS MAPEADOS!")
-                else:
-                    st.sidebar.success("🎉 Nenhuma obra em conflito!")
+                if qtd_conflitos > 0: st.sidebar.error(f"🚨 {qtd_conflitos} CONFLITOS ISOLADOS!")
+                else: st.sidebar.success("🎉 Nenhuma obra em conflito!")
             
     st.markdown("---")
     st.markdown("### 🗑️ Gerenciar Malha Local")
@@ -534,75 +539,44 @@ with st.sidebar:
                 st.rerun()
 
 # ==========================================
-# 3. CONSTRUÇÃO DO MAPA FOLIUM (BASE)
+# DASHBOARD DE INDICADORES (KPIs)
+# ==========================================
+with kpi_container.container():
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("⚡ Alimentadores Mapeados", len(df['ALIMENTADOR'].unique()) if not df.empty else 0)
+    
+    if msg_obras == "OK" and df_concluidas is not None:
+        c2.metric("🔵 Obras Concluídas", len(df_concluidas))
+        c3.metric("🟢 Obras em Andamento", len(df_andamento))
+        c4.metric("🚨 Conflitos (50m)", df_andamento['CONFLITO'].sum() if not df_andamento.empty else 0)
+    else:
+        c2.metric("🔵 Obras Concluídas", 0)
+        c3.metric("🟢 Obras em Andamento", 0)
+        c4.metric("🚨 Conflitos (50m)", 0)
+    st.markdown("---")
+
+# ==========================================
+# 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE)
 # ==========================================
 mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canvas=True)
 
-folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-    attr='Google',
-    name='Satélite (Google Maps)',
-    overlay=False,
-    control=True,
-    max_zoom=20
-).add_to(mapa)
-
-folium.TileLayer(
-    tiles='OpenStreetMap',
-    name='Mapa Base (Limpo)',
-    overlay=False,
-    control=True,
-    max_zoom=20
-).add_to(mapa)
+folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
+folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 
 if geo_data_ibge:
     def style_function(feature):
         reg_mun = feature['properties'].get('MUNICIPIO', '')
         reg_name = feature['properties'].get('REGIONAL', '')
         cor_regiao = feature['properties']['fillColor']
-        
         if municipios_sel:
             if reg_mun in municipios_sel: return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
-        
         elif regioes_sel:
             if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
-        
         return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
 
-    folium.GeoJson(
-        geo_data_ibge,
-        name="Divisão IBGE (Maranhão)",
-        style_function=style_function,
-        tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"),
-        zoom_on_click=False,
-        show=True
-    ).add_to(mapa)
-
-    map_id = mapa.get_name()
-    js_zoom_hide = f"""
-    <script>
-        setTimeout(function() {{
-            var ibge_layer_{map_id} = null;
-            {map_id}.eachLayer(function(layer) {{
-                if (layer.options && layer.options.name === 'Divisão IBGE (Maranhão)') {{
-                    ibge_layer_{map_id} = layer;
-                }}
-            }});
-            {map_id}.on('zoomend', function() {{
-                if (ibge_layer_{map_id}) {{
-                    if ({map_id}.getZoom() > 9) {{
-                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.removeLayer(ibge_layer_{map_id}); }}
-                    }} else {{
-                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.addLayer(ibge_layer_{map_id}); }}
-                    }}
-                }}
-            }});
-        }}, 500);
-    </script>
-    """
-    mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
+    folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
 
 todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
@@ -622,11 +596,6 @@ if not df.empty:
     nearest_idx = None
 
     if busca_lat is not None and busca_lon is not None and not df_mapa.empty:
-        def latlon_to_xyz(lat, lon):
-            R = 6371.0
-            lat_rad, lon_rad = math.radians(lat), math.radians(lon)
-            return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
-
         pts, indices = [], []
         for idx, row in df_mapa.iterrows():
             if row['TIPO_GEOMETRIA'] == 'Ponto':
@@ -687,11 +656,7 @@ if not df.empty:
                 elif any(x in tipo for x in ['TRANSFORMADOR', 'CHAVE', 'REGULADOR', 'RELIGADOR', 'SUBESTA', 'CAPACITOR']): raio = 12
                 return {'color': cor, 'fillColor': cor, 'fillOpacity': 1.0, 'radius': raio, 'weight': 2}
 
-        folium.GeoJson(
-            geojson_data, name="Rede Elétrica", style_function=style_fn, marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1),
-            tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'Identificação:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 5px;"),
-            popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'MUNICIPIO', 'GPS'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'], style="font-family: sans-serif; font-size: 13px; min-width: 250px;")
-        ).add_to(mapa)
+        folium.GeoJson(geojson_data, name="Rede Elétrica", style_function=style_fn, marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1), tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'Identificação:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 5px;"), popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'MUNICIPIO', 'GPS'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'], style="font-family: sans-serif; font-size: 13px; min-width: 250px;")).add_to(mapa)
 
     fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
     for _, row in df_busca.iterrows():
@@ -714,83 +679,51 @@ if not df.empty:
         else:
             folium.Marker(location=row['COORDS'], icon=folium.Icon(color='purple', icon='star'), popup=popup, tooltip=f"ALVO ENCONTRADO: {html.escape(str(row['NOME']))}").add_to(fg_busca)
             busca_lats.append(row['COORDS'][0]); busca_lons.append(row['COORDS'][1])
-
-    if busca_lat is not None and busca_lon is not None:
-        folium.Marker(location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'), tooltip="Sua Pesquisa GPS").add_to(fg_busca)
-
+    if busca_lat is not None and busca_lon is not None: folium.Marker(location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'), tooltip="Sua Pesquisa GPS").add_to(fg_busca)
     fg_busca.add_to(mapa)
 
 if mostrar_quilombos:
     geo_q = get_kml_cached("assets/quilombos.kml", "#ff7f00")
-    if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Quilombo:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
+    if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 if mostrar_indigenas:
     geo_i = get_kml_cached("assets/indigenas.kml", "#2ca02c")
-    if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Terra Indígena:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
-
-if mostrar_arqueologia:
-    geo_a = get_kml_cached("assets/arqueologia.kml", "#1f77b4")
-    if geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4"), tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Sítio:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
-
-if mostrar_uc_federal:
-    geo_uc_fed = get_kml_cached("assets/uc_federal.kml", "#e6b800")
-    if geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Federal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
-
-if mostrar_uc_estadual:
-    geo_uc_est = get_kml_cached("assets/uc_estadual.kml", "#ffff00")
-    if geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Estadual:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
-
-if mostrar_uc_municipal:
-    geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70")
-    if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
+    if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 
 # ==========================================
-# CAMADAS DE OBRAS OTIMIZADAS (SÓ MOSTRA CONFLITOS!)
+# CAMADAS DE OBRAS OTIMIZADAS (50 METROS)
 # ==========================================
 dados_tabela_conflito = []
 
-if (mostrar_concluidas or mostrar_conflitantes) and msg_obras == "OK":
+if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap) and msg_obras == "OK":
     
-    # Prepara a lista de protocolos em conflito
+    # 🔥 Novo: Mapa de Calor (Densidade)
+    if mostrar_heatmap:
+        heat_data = []
+        if df_andamento is not None and not df_andamento.empty: heat_data.extend(df_andamento[['LAT_CLEAN', 'LON_CLEAN']].values.tolist())
+        if df_concluidas is not None and not df_concluidas.empty: heat_data.extend(df_concluidas[['LAT_CLEAN', 'LON_CLEAN']].values.tolist())
+        if heat_data: HeatMap(heat_data, radius=15, blur=10, name="🔥 Densidade de Obras").add_to(mapa)
+    
     protocolos_com_conflito = set()
     if df_andamento is not None:
         protocolos_com_conflito = set(df_andamento[df_andamento['CONFLITO']]['PROTOCOLO_CONFLITO'].astype(str))
     
-    # 1. Desenha Obras Concluídas (Apenas os Alvos do Conflito)
+    # 1. Desenha Obras Concluídas
     if mostrar_concluidas and df_concluidas is not None:
         fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Alvos)", show=True)
         for _, row in df_concluidas.iterrows():
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
-            
-            # Pula as obras concluídas que estão "livres"
-            if protocolo not in protocolos_com_conflito:
-                continue
+            if protocolo not in protocolos_com_conflito: continue
 
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             municipio = str(row.get('MUNICIPIO', 'S/N'))
             cor_concluida = '#1f77b4' # Azul
             
-            html_popup = f"""
-            <div style="min-width: 200px; font-family: sans-serif;">
-                <h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4>
-                <table style="width:100%;">
-                    <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
-                    <tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr>
-                </table>
-            </div>
-            """
-            
-            folium.CircleMarker(
-                location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1
-            ).add_to(fg_concluidas)
-            
-            # RAIO ATUALIZADO AQUI
-            folium.Circle(
-                location=[lat, lon], radius=150, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, 
-                tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
-            ).add_to(fg_concluidas)
-            
+            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr></table></div>"""
+            folium.CircleMarker(location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1).add_to(fg_concluidas)
+            # RAIO REDUZIDO PARA 50 METROS AQUI
+            folium.Circle(location=[lat, lon], radius=50, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
             
     # 2. Desenha Obras em Andamento (Apenas Vermelhas/Conflitantes)
@@ -798,13 +731,11 @@ if (mostrar_concluidas or mostrar_conflitantes) and msg_obras == "OK":
         fg_andamento = folium.FeatureGroup(name="Obras Conflitantes", show=True)
         
         for _, row in df_andamento.iterrows():
-            if not row['CONFLITO']:
-                continue
+            if not row['CONFLITO']: continue
                 
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
             status_list = str(row.get('STATUS LIST', 'S/N'))
-            
             cor_ponto = 'red'
             titulo = "🚨 CONFLITO DETECTADO"
             info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
@@ -815,38 +746,46 @@ if (mostrar_concluidas or mostrar_conflitantes) and msg_obras == "OK":
                 "Conflito (Alvo Concluída)": row['PROTOCOLO_CONFLITO'],
                 "Distância do Centro (m)": f"{row['DISTANCIA_CONFLITO']:.1f}m",
                 "Latitude": lat,
-                "Longitude": lon
+                "Longitude": lon,
+                "Google Maps": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
             })
                 
-            html_popup = f"""
-            <div style="min-width: 250px; font-family: sans-serif;">
-                <h4 style="margin-top: 0; color: {cor_ponto}; border-bottom: 2px solid {cor_ponto}; padding-bottom: 5px;">{titulo}</h4>
-                <table style="width:100%;">
-                    <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
-                    <tr><td style="color: #555; padding: 2px;"><b>STATUS:</b></td><td>{html.escape(status_list)}</td></tr>
-                    {info_extra}
-                </table>
-            </div>
-            """
-            
-            folium.CircleMarker(
-                location=[lat, lon], 
-                radius=6, 
-                color='black', 
-                weight=1, 
-                fill=True, 
-                fillColor=cor_ponto, 
-                fillOpacity=0.9,
-                tooltip=f"{titulo}: {html.escape(protocolo)}", 
-                popup=folium.Popup(html_popup, max_width=300)
-            ).add_to(fg_andamento)
-            
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_ponto}; border-bottom: 2px solid {cor_ponto}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>STATUS:</b></td><td>{html.escape(status_list)}</td></tr>{info_extra}</table></div>"""
+            folium.CircleMarker(location=[lat, lon], radius=6, color='black', weight=1, fill=True, fillColor=cor_ponto, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_andamento)
         fg_andamento.add_to(mapa)
 
 folium.LayerControl(position='topright').add_to(mapa)
 
+# ==========================================
+# ⚡ CRUZAMENTO COM A MALHA (.KMZ)
+# ==========================================
+# Identifica qual Poste/Trafo está perto do conflito para colocar na tabela
+if len(dados_tabela_conflito) > 0 and not df.empty:
+    df_malha_filtro = df.copy()
+    if alimentadores_visiveis: df_malha_filtro = df_malha_filtro[df_malha_filtro['ALIMENTADOR'].isin(alimentadores_visiveis)]
+    if not df_malha_filtro.empty:
+        grid_pts = []
+        grid_info = []
+        for idx, row in df_malha_filtro.iterrows():
+            if row['TIPO_GEOMETRIA'] == 'Ponto':
+                lat_m, lon_m = row['COORDS'][0], row['COORDS'][1]
+                grid_pts.append(latlon_to_xyz(lat_m, lon_m))
+                grid_info.append(f"{row['TIPO_REDE']} ({row['NOME']})")
+            else:
+                for pt in row['COORDS']:
+                    lat_m, lon_m = pt[0], pt[1]
+                    grid_pts.append(latlon_to_xyz(lat_m, lon_m))
+                    grid_info.append(f"{row['TIPO_REDE']} ({row['NOME']})")
+        if grid_pts:
+            tree_grid = cKDTree(grid_pts)
+            for conflito in dados_tabela_conflito:
+                xyz = latlon_to_xyz(conflito['Latitude'], conflito['Longitude'])
+                _, idx_prox = tree_grid.query(xyz)
+                conflito['Rede Visível Próxima'] = grid_info[idx_prox]
+
+
 # -------------------------------------------------------------
-# 4. CAPTURANDO CLIQUE NA TABELA
+# 5. TABELA INTELIGENTE E BOTÃO DE EXPORTAÇÃO
 # -------------------------------------------------------------
 zoom_lat, zoom_lon = None, None
 
@@ -854,9 +793,7 @@ with table_container:
     if mostrar_conflitantes and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
         st.markdown("---")
         st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
-        
-        # TEXTO DA TABELA ATUALIZADO PARA 150 METROS
-        st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 150 metros** de uma obra já dada como concluída no SISCO.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
+        st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 50 metros** de uma obra já dada como concluída no SISCO.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
         
         df_tabela = pd.DataFrame(dados_tabela_conflito)
         
@@ -865,7 +802,8 @@ with table_container:
                 df_tabela, 
                 use_container_width=True, 
                 on_select="rerun", 
-                selection_mode="single_row"
+                selection_mode="single_row",
+                column_config={"Google Maps": st.column_config.LinkColumn("📍 Google Maps", display_text="Abrir Rota Google")}
             )
             if hasattr(event, 'selection') and event.selection.rows:
                 idx = event.selection.rows[0]
@@ -873,14 +811,19 @@ with table_container:
                 zoom_lon = float(df_tabela.iloc[idx]['Longitude'])
         except Exception:
             st.dataframe(df_tabela, use_container_width=True)
-            escolha = st.selectbox("📌 O seu sistema Streamlit está desatualizado. Use esta caixa para selecionar a obra e dar zoom:", ["Nenhum"] + df_tabela['Protocolo (Nova)'].astype(str).tolist())
-            if escolha != "Nenhum":
-                linha = df_tabela[df_tabela['Protocolo (Nova)'].astype(str) == escolha].iloc[0]
-                zoom_lat = float(linha['Latitude'])
-                zoom_lon = float(linha['Longitude'])
+        
+        # 📥 BOTÃO NATIVO DE EXPORTAÇÃO EXCEL/CSV
+        csv = df_tabela.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 Baixar Relatório Completo de Conflitos (CSV)",
+            data=csv,
+            file_name="conflitos_obras_mapeadas.csv",
+            mime="text/csv",
+            type="primary"
+        )
 
 # -------------------------------------------------------------
-# 5. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL
+# 6. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL DO MAPA
 # -------------------------------------------------------------
 if zoom_lat is not None and zoom_lon is not None:
     mapa.fit_bounds([[zoom_lat - 0.001, zoom_lon - 0.001], [zoom_lat + 0.001, zoom_lon + 0.001]])
