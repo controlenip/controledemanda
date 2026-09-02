@@ -30,11 +30,12 @@ def remove_accents(input_str):
 
 @st.cache_data(show_spinner=False)
 def load_base_mapping():
-    """Lê a BASE.xlsx para descobrir exatamente qual município pertence a qual regional"""
+    """Lê a planilha para descobrir exatamente qual município pertence a qual regional"""
     mun_to_reg = {}
     try:
-        if os.path.exists("BASE.xlsx"):
-            df_base = pd.read_excel("BASE.xlsx")
+        # ALTERAÇÃO 1: NOME DA PLANILHA CORRIGIDO AQUI
+        if os.path.exists("MUNICIPIOS-REGIONAIS.xlsx"):
+            df_base = pd.read_excel("MUNICIPIOS-REGIONAIS.xlsx")
             for _, row in df_base.iterrows():
                 mun = remove_accents(row.get('MunicIpio', '')).upper().strip()
                 reg = str(row.get('Regional', '')).strip().upper()
@@ -446,8 +447,9 @@ folium.TileLayer(
     max_zoom=20
 ).add_to(mapa)
 
+# ALTERAÇÃO 2: TILELAYER CORRIGIDA (SEM API KEY REQUIRED)
 folium.TileLayer(
-    tiles='CartoDB positron',
+    tiles='OpenStreetMap',
     name='Mapa Base (Limpo)',
     overlay=False,
     control=True,
