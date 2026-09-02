@@ -296,56 +296,88 @@ def carregar_banco_redes():
     if dfs: return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
-# FUNÇÃO REESCRITA E BLINDADA
+
+# FUNÇÃO AVANÇADA: CARREGA, FILTRA E FAZ O CRUZAMENTO ESPACIAL
 @st.cache_data(show_spinner=False)
-def carregar_obras_concluidas():
+def carregar_e_cruzar_obras():
     file_path = "BASE_LEVANTAMENTO_ATUALIZADA.xlsx"
     if not os.path.exists(file_path):
-        return "Arquivo 'BASE_LEVANTAMENTO_ATUALIZADA.xlsx' não encontrado."
+        return "Arquivo 'BASE_LEVANTAMENTO_ATUALIZADA.xlsx' não encontrado.", None, None
         
     try:
         df_obras = pd.read_excel(file_path)
         
-        # 1. Encontra a coluna de status ignorando espaços ou erros de digitação
-        status_col = None
-        for col in df_obras.columns:
-            if 'STATUS SISCO' in str(col).upper():
-                status_col = col
-                break
-        if not status_col:
-            return "Erro: Coluna 'STATUS SISCO' não encontrada."
-            
-        # 2. Encontra colunas de Latitude e Longitude dinamicamente
-        lat_col, lon_col = None, None
-        for col in df_obras.columns:
-            if 'LATITUDE' in str(col).upper() or 'LAT' == str(col).upper():
-                lat_col = col
-            if 'LONGITUDE' in str(col).upper() or 'LON' == str(col).upper():
-                lon_col = col
-        if not lat_col or not lon_col:
-            return "Erro: Colunas de Latitude ou Longitude ausentes."
-            
-        # 3. Filtra obras
-        mask = df_obras[status_col].astype(str).str.contains('CONCLU', case=False, na=False)
-        df_filtrado = df_obras[mask].copy()
+        status_sisco_col = next((c for c in df_obras.columns if 'STATUS SISCO' in str(c).upper()), None)
+        status_list_col = next((c for c in df_obras.columns if 'STATUS LIST' in str(c).upper()), None)
+        lat_col = next((c for c in df_obras.columns if 'LATITUDE' in str(c).upper() or 'LAT' == str(c).upper()), None)
+        lon_col = next((c for c in df_obras.columns if 'LONGITUDE' in str(c).upper() or 'LON' == str(c).upper()), None)
         
-        # 4. Arruma as coordenadas (troca vírgula por ponto)
-        if df_filtrado[lat_col].dtype == object:
-            df_filtrado[lat_col] = df_filtrado[lat_col].astype(str).str.replace(',', '.')
-        if df_filtrado[lon_col].dtype == object:
-            df_filtrado[lon_col] = df_filtrado[lon_col].astype(str).str.replace(',', '.')
+        if not all([status_sisco_col, status_list_col, lat_col, lon_col]):
+            return "Erro: Colunas obrigatórias ausentes na planilha (Status ou Coordenadas).", None, None
             
-        df_filtrado['LAT_CLEAN'] = pd.to_numeric(df_filtrado[lat_col], errors='coerce')
-        df_filtrado['LON_CLEAN'] = pd.to_numeric(df_filtrado[lon_col], errors='coerce')
-        
-        df_filtrado = df_filtrado.dropna(subset=['LAT_CLEAN', 'LON_CLEAN'])
-        
-        if len(df_filtrado) == 0:
-            return "Nenhuma obra com status Concluído e coordenadas válidas encontrada."
+        # Arrumar Coordenadas
+        if df_obras[lat_col].dtype == object: df_obras[lat_col] = df_obras[lat_col].astype(str).str.replace(',', '.')
+        if df_obras[lon_col].dtype == object: df_obras[lon_col] = df_obras[lon_col].astype(str).str.replace(',', '.')
             
-        return df_filtrado
+        df_obras['LAT_CLEAN'] = pd.to_numeric(df_obras[lat_col], errors='coerce')
+        df_obras['LON_CLEAN'] = pd.to_numeric(df_obras[lon_col], errors='coerce')
+        df_obras = df_obras.dropna(subset=['LAT_CLEAN', 'LON_CLEAN'])
+        
+        # 1. Filtra Obras Concluídas (Raio)
+        mask_concluida = df_obras[status_sisco_col].astype(str).str.contains('CONCLU', case=False, na=False)
+        df_concluidas = df_obras[mask_concluida].copy()
+        
+        # 2. Filtra Obras em Andamento / Levantamento
+        def normalizar(x): return remove_accents(str(x)).upper().strip()
+        df_obras['STATUS_LIST_NORM'] = df_obras[status_list_col].apply(normalizar)
+        
+        status_alvos = ['0', 'EM LEVANTAMENTO', 'CORRECAO DE LEVANTAMENTO']
+        mask_andamento = df_obras['STATUS_LIST_NORM'].isin(status_alvos)
+        df_andamento = df_obras[mask_andamento & (~mask_concluida)].copy()
+        
+        # 3. Cruzamento Espacial (Detecção de Conflitos a <= 100m)
+        df_andamento['CONFLITO'] = False
+        df_andamento['PROTOCOLO_CONFLITO'] = ""
+        df_andamento['DISTANCIA_CONFLITO'] = 0.0
+        
+        if not df_concluidas.empty and not df_andamento.empty:
+            def latlon_to_xyz(lat, lon):
+                R = 6371000.0 # Raio da terra em metros
+                lat_rad, lon_rad = math.radians(lat), math.radians(lon)
+                return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
+            
+            pts_concluidas = [latlon_to_xyz(row['LAT_CLEAN'], row['LON_CLEAN']) for _, row in df_concluidas.iterrows()]
+            arvore_kdtree = cKDTree(pts_concluidas)
+            
+            conflitos_flags = []
+            conflitos_protos = []
+            conflitos_dists = []
+            
+            for _, row in df_andamento.iterrows():
+                xyz = latlon_to_xyz(row['LAT_CLEAN'], row['LON_CLEAN'])
+                _, idx_mais_proximo = arvore_kdtree.query(xyz)
+                
+                obra_concluida_proxima = df_concluidas.iloc[idx_mais_proximo]
+                distancia_exata_m = haversine(row['LAT_CLEAN'], row['LON_CLEAN'], obra_concluida_proxima['LAT_CLEAN'], obra_concluida_proxima['LON_CLEAN']) * 1000
+                
+                if distancia_exata_m <= 100:
+                    conflitos_flags.append(True)
+                    conflitos_protos.append(str(obra_concluida_proxima.get('PROTOCOLO', 'S/N')))
+                    conflitos_dists.append(distancia_exata_m)
+                else:
+                    conflitos_flags.append(False)
+                    conflitos_protos.append("")
+                    conflitos_dists.append(0.0)
+                    
+            df_andamento['CONFLITO'] = conflitos_flags
+            df_andamento['PROTOCOLO_CONFLITO'] = conflitos_protos
+            df_andamento['DISTANCIA_CONFLITO'] = conflitos_dists
+            
+        return "OK", df_concluidas, df_andamento
+        
     except Exception as e:
-        return f"Erro processando planilha: {str(e)}"
+        return f"Erro processando dados: {str(e)}", None, None
+
 
 # ==========================================
 # 2. INTERFACE E FILTROS DO SISTEMA
@@ -363,7 +395,6 @@ with st.sidebar:
     
     if arquivos_upados:
         if st.button(f"💾 Processar e Salvar {len(arquivos_upados)} Arquivo(s)", type="primary", use_container_width=True):
-            
             qtd_total_processados = 0
             tamanho_lote = 3 # Lote reduzido para não estourar a memória
             total_lotes = math.ceil(len(arquivos_upados) / tamanho_lote)
@@ -462,17 +493,19 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
-    mostrar_obras = st.checkbox("🟢 Obras Concluídas (Raio 100m)", value=False)
+    mostrar_obras = st.checkbox("🟢 Cruzamento de Obras (Detecção 100m)", value=False)
     
-    # Processamento Inteligente com Alerta de Erro
-    df_obras_mapa = None
+    msg_obras, df_concluidas, df_andamento = "OK", None, None
     if mostrar_obras:
-        resultado = carregar_obras_concluidas()
-        if isinstance(resultado, str):
-            st.sidebar.warning(f"⚠️ {resultado}")
+        msg_obras, df_concluidas, df_andamento = carregar_e_cruzar_obras()
+        if msg_obras != "OK":
+            st.sidebar.warning(f"⚠️ {msg_obras}")
         else:
-            df_obras_mapa = resultado
-            st.sidebar.success(f"✅ {len(df_obras_mapa)} Obras carregadas no mapa!")
+            qtd_conflitos = df_andamento['CONFLITO'].sum()
+            st.sidebar.success(f"✅ {len(df_concluidas)} Concluídas (Raios)")
+            st.sidebar.info(f"✅ {len(df_andamento)} Em Andamento (Pontos)")
+            if qtd_conflitos > 0:
+                st.sidebar.error(f"🚨 {qtd_conflitos} OBRAS EM CONFLITO!")
             
     st.markdown("---")
     st.markdown("### 🗑️ Gerenciar Malha Local")
@@ -716,37 +749,87 @@ if mostrar_uc_municipal:
     geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70") # Amarelo Claro
     if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
-# Nova camada: Obras concluídas (Raio 100m)
-if mostrar_obras and df_obras_mapa is not None:
-    fg_obras = folium.FeatureGroup(name="Obras Concluídas (Raio 100m)", show=True)
-    for _, row in df_obras_mapa.iterrows():
-        lat = row['LAT_CLEAN']
-        lon = row['LON_CLEAN']
-        protocolo = str(row.get('PROTOCOLO', 'S/N'))
-        municipio = str(row.get('MUNICIPIO', 'S/N'))
-        tipo = str(row.get('TIPO NOTA', 'N/A'))
-        
-        html_popup = f"""
-        <div style="min-width: 200px; font-family: sans-serif;">
-            <h4 style="margin-top: 0; color: #2ca02c; border-bottom: 2px solid #2ca02c; padding-bottom: 5px;">Obra Concluída</h4>
-            <table style="width:100%;">
-                <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
-                <tr><td style="color: #555; padding: 2px;"><b>TIPO NOTA:</b></td><td>{html.escape(tipo)}</td></tr>
-                <tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr>
-            </table>
-        </div>
-        """
-        
-        folium.CircleMarker(
-            location=[lat, lon], radius=3, color='black', fill=True, fillColor='black', fillOpacity=1
-        ).add_to(fg_obras)
-        
-        folium.Circle(
-            location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35,
-            tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
-        ).add_to(fg_obras)
-        
+
+# Nova camada: Inteligência de Cruzamento de Obras
+dados_tabela_conflito = []
+
+if mostrar_obras and msg_obras == "OK":
+    fg_obras = folium.FeatureGroup(name="Obras e Conflitos", show=True)
+    
+    # 1. Pinta Obras Concluídas (Centro Preto e Raio Verde)
+    if df_concluidas is not None:
+        for _, row in df_concluidas.iterrows():
+            lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
+            protocolo = str(row.get('PROTOCOLO', 'S/N'))
+            municipio = str(row.get('MUNICIPIO', 'S/N'))
+            
+            html_popup = f"""
+            <div style="min-width: 200px; font-family: sans-serif;">
+                <h4 style="margin-top: 0; color: #2ca02c; border-bottom: 2px solid #2ca02c; padding-bottom: 5px;">Obra Concluída</h4>
+                <table style="width:100%;">
+                    <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
+                    <tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr>
+                </table>
+            </div>
+            """
+            
+            folium.CircleMarker(location=[lat, lon], radius=3, color='black', fill=True, fillColor='black', fillOpacity=1).add_to(fg_obras)
+            folium.Circle(location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_obras)
+            
+    # 2. Pinta Obras em Andamento (Azul Limpo ou Vermelho Conflito)
+    if df_andamento is not None:
+        for _, row in df_andamento.iterrows():
+            lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
+            protocolo = str(row.get('PROTOCOLO', 'S/N'))
+            status_list = str(row.get('STATUS LIST', 'S/N'))
+            
+            if row['CONFLITO']:
+                cor_ponto = 'red'
+                titulo = "🚨 CONFLITO DETECTADO"
+                info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
+                
+                # Guarda info para a tabela
+                dados_tabela_conflito.append({
+                    "Protocolo (Nova)": protocolo,
+                    "Status (Nova)": status_list,
+                    "Conflito (Alvo Concluída)": row['PROTOCOLO_CONFLITO'],
+                    "Distância do Centro (m)": f"{row['DISTANCIA_CONFLITO']:.1f}m",
+                    "Latitude": lat,
+                    "Longitude": lon
+                })
+            else:
+                cor_ponto = '#1f77b4' # Azul
+                titulo = "Obra em Andamento"
+                info_extra = ""
+                
+            html_popup = f"""
+            <div style="min-width: 250px; font-family: sans-serif;">
+                <h4 style="margin-top: 0; color: {cor_ponto}; border-bottom: 2px solid {cor_ponto}; padding-bottom: 5px;">{titulo}</h4>
+                <table style="width:100%;">
+                    <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
+                    <tr><td style="color: #555; padding: 2px;"><b>STATUS:</b></td><td>{html.escape(status_list)}</td></tr>
+                    {info_extra}
+                </table>
+            </div>
+            """
+            
+            folium.CircleMarker(
+                location=[lat, lon], radius=6 if row['CONFLITO'] else 4, color=cor_ponto, fill=True, fillColor=cor_ponto, fillOpacity=0.9,
+                tooltip=f"{titulo}: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
+            ).add_to(fg_obras)
+            
     fg_obras.add_to(mapa)
 
 folium.LayerControl(position='topright').add_to(mapa)
 st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
+
+# ==========================================
+# 4. TABELA DE EXPORTAÇÃO (CONFLITOS)
+# ==========================================
+if mostrar_obras and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
+    st.markdown("---")
+    st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
+    st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 100 metros** de uma obra já dada como concluída no SISCO.")
+    
+    df_tabela = pd.DataFrame(dados_tabela_conflito)
+    st.dataframe(df_tabela, use_container_width=True)
