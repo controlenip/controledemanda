@@ -10,6 +10,7 @@ import math
 import requests
 import unicodedata
 import folium
+from folium.plugins import MarkerCluster
 import gc
 from streamlit_folium import st_folium
 import html
@@ -296,8 +297,6 @@ def carregar_banco_redes():
     if dfs: return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
-
-# FUNÇÃO AVANÇADA: CARREGA, FILTRA E FAZ O CRUZAMENTO ESPACIAL
 @st.cache_data(show_spinner=False)
 def carregar_e_cruzar_obras():
     file_path = "BASE_LEVANTAMENTO_ATUALIZADA.xlsx"
@@ -315,7 +314,6 @@ def carregar_e_cruzar_obras():
         if not all([status_sisco_col, status_list_col, lat_col, lon_col]):
             return "Erro: Colunas obrigatórias ausentes na planilha (Status ou Coordenadas).", None, None
             
-        # Arrumar Coordenadas
         if df_obras[lat_col].dtype == object: df_obras[lat_col] = df_obras[lat_col].astype(str).str.replace(',', '.')
         if df_obras[lon_col].dtype == object: df_obras[lon_col] = df_obras[lon_col].astype(str).str.replace(',', '.')
             
@@ -335,14 +333,14 @@ def carregar_e_cruzar_obras():
         mask_andamento = df_obras['STATUS_LIST_NORM'].isin(status_alvos)
         df_andamento = df_obras[mask_andamento & (~mask_concluida)].copy()
         
-        # 3. Cruzamento Espacial (Detecção de Conflitos a <= 100m)
+        # 3. Cruzamento Espacial
         df_andamento['CONFLITO'] = False
         df_andamento['PROTOCOLO_CONFLITO'] = ""
         df_andamento['DISTANCIA_CONFLITO'] = 0.0
         
         if not df_concluidas.empty and not df_andamento.empty:
             def latlon_to_xyz(lat, lon):
-                R = 6371000.0 # Raio da terra em metros
+                R = 6371000.0 # Metros
                 lat_rad, lon_rad = math.radians(lat), math.radians(lon)
                 return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
             
@@ -503,7 +501,7 @@ with st.sidebar:
         else:
             qtd_conflitos = df_andamento['CONFLITO'].sum()
             st.sidebar.success(f"✅ {len(df_concluidas)} Concluídas (Raios)")
-            st.sidebar.info(f"✅ {len(df_andamento)} Em Andamento (Pontos)")
+            st.sidebar.info(f"✅ {len(df_andamento)} Em Andamento (Clusters)")
             if qtd_conflitos > 0:
                 st.sidebar.error(f"🚨 {qtd_conflitos} OBRAS EM CONFLITO!")
             
@@ -749,15 +747,14 @@ if mostrar_uc_municipal:
     geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70") # Amarelo Claro
     if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
-
-# Nova camada: Inteligência de Cruzamento de Obras
+# Nova camada: Inteligência de Cruzamento de Obras com CLUSTER
 dados_tabela_conflito = []
 
 if mostrar_obras and msg_obras == "OK":
-    fg_obras = folium.FeatureGroup(name="Obras e Conflitos", show=True)
     
-    # 1. Pinta Obras Concluídas (Centro Preto e Raio Verde)
+    # 1. Pinta Obras Concluídas (Centro Preto e Raio Verde) DIRETAMENTE NO MAPA para manter o raio visível
     if df_concluidas is not None:
+        fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Raios)", show=True)
         for _, row in df_concluidas.iterrows():
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
@@ -773,11 +770,14 @@ if mostrar_obras and msg_obras == "OK":
             </div>
             """
             
-            folium.CircleMarker(location=[lat, lon], radius=3, color='black', fill=True, fillColor='black', fillOpacity=1).add_to(fg_obras)
-            folium.Circle(location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_obras)
+            folium.CircleMarker(location=[lat, lon], radius=3, color='black', fill=True, fillColor='black', fillOpacity=1).add_to(fg_concluidas)
+            folium.Circle(location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
+        fg_concluidas.add_to(mapa)
             
-    # 2. Pinta Obras em Andamento (Azul Limpo ou Vermelho Conflito)
+    # 2. Pinta Obras em Andamento DENTRO DE UM CLUSTER (Otimização Extrema de Performance)
     if df_andamento is not None:
+        cluster_andamento = MarkerCluster(name="Obras em Andamento (Cluster)")
+        
         for _, row in df_andamento.iterrows():
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
@@ -788,7 +788,6 @@ if mostrar_obras and msg_obras == "OK":
                 titulo = "🚨 CONFLITO DETECTADO"
                 info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
                 
-                # Guarda info para a tabela
                 dados_tabela_conflito.append({
                     "Protocolo (Nova)": protocolo,
                     "Status (Nova)": status_list,
@@ -816,11 +815,13 @@ if mostrar_obras and msg_obras == "OK":
             folium.CircleMarker(
                 location=[lat, lon], radius=6 if row['CONFLITO'] else 4, color=cor_ponto, fill=True, fillColor=cor_ponto, fillOpacity=0.9,
                 tooltip=f"{titulo}: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
-            ).add_to(fg_obras)
+            ).add_to(cluster_andamento)
             
-    fg_obras.add_to(mapa)
+        cluster_andamento.add_to(mapa)
 
 folium.LayerControl(position='topright').add_to(mapa)
+
+# Renderiza o mapa optimizado
 st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
 
 # ==========================================
