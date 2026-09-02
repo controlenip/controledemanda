@@ -342,6 +342,45 @@ base_map = load_base_mapping()
 geo_data_ibge = get_base_geojson()
 
 # ==========================================
+# PREPARAÇÃO DAS ÁREAS ESPECIAIS (CARREGAMENTO)
+# ==========================================
+geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00")
+geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c")
+geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#1f77b4")
+geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800")
+geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00")
+geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00")
+
+dict_areas_especiais = {
+    "Quilombo": geo_q,
+    "Terra Indígena": geo_i,
+    "Sítio Arqueológico": geo_a,
+    "UC Federal": geo_uc_fed,
+    "UC Estadual": geo_uc_est,
+    "UC Municipal": geo_uc_mun
+}
+
+def verificar_areas_da_obra(lat, lon):
+    """Verifica se a coordenada exata de uma obra cai dentro dos polígonos dos KMLs"""
+    encontradas = []
+    for categoria, geo_data in dict_areas_especiais.items():
+        if not geo_data: continue
+        for feat in geo_data['features']:
+            geom = feat['geometry']
+            nome = feat['properties'].get('NOME', 'Sem Nome')
+            if geom['type'] == 'Polygon':
+                for ring in geom['coordinates']:
+                    if is_point_in_polygon(lon, lat, ring):
+                        encontradas.append(f"<b>{categoria}:</b> {nome}")
+                        break
+            elif geom['type'] == 'Point':
+                pt_lon, pt_lat = geom['coordinates']
+                # Sítios arqueológicos normalmente são pontos, adotamos raio de alerta de 150 metros
+                if haversine(lat, lon, pt_lat, pt_lon) * 1000 <= 150:
+                    encontradas.append(f"<b>{categoria}:</b> {nome} (Raio 150m)")
+    return "<br>".join(encontradas) if encontradas else "Nenhuma restrição"
+
+# ==========================================
 # 3. INTERFACE E FILTROS LATERAIS
 # ==========================================
 with st.sidebar:
@@ -413,7 +452,6 @@ with st.sidebar:
             
     st.markdown("---")
     st.markdown("### 🗺️ 5. Áreas Especiais")
-    # ✅ CORREÇÃO: Checkboxes ativados por padrão (value=True) para carregar automaticamente no mapa
     mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=True)
     mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=True)
     mostrar_arqueologia = st.checkbox("🔵 Sítios Arqueológicos", value=True)
@@ -428,6 +466,7 @@ with st.sidebar:
     mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
     mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
     mostrar_clima = st.checkbox("🌦️ Radar Climático (Nuvens e Chuva)", value=False)
+    mostrar_streetview = st.checkbox("🛣️ Cobertura Street View", value=False) # ✅ CHECKBOX NOVA DO STREET VIEW
     
     msg_obras, df_concluidas, df_andamento, df_invalidas = "OK", None, None, None
     if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras:
@@ -722,35 +761,16 @@ if not df.empty:
     if busca_lat is not None and busca_lon is not None: folium.Marker(location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'), tooltip="Sua Pesquisa GPS").add_to(fg_busca)
     fg_busca.add_to(mapa)
 
-# ✅ CORREÇÃO: Apontando os KMLs para a pasta exata (kmls/) e nomes exatos dos arquivos do GitHub
-if mostrar_quilombos:
-    geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00")
-    if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
-
-if mostrar_indigenas:
-    geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c")
-    if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
-
-if mostrar_arqueologia:
-    geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#1f77b4")
-    if geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4")).add_to(mapa)
-
-if mostrar_uc_federal:
-    geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800")
-    if geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
-
-if mostrar_uc_estadual:
-    geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00")
-    if geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
-
-# ✅ CORREÇÃO: Adicionado o bloco para mostrar a UC Municipal que estava faltando
-if mostrar_uc_municipal:
-    geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00")
-    if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+if mostrar_quilombos and geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+if mostrar_indigenas and geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+if mostrar_arqueologia and geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4")).add_to(mapa)
+if mostrar_uc_federal and geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+if mostrar_uc_estadual and geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+if mostrar_uc_municipal and geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 
 # ==========================================
-# CAMADAS DE OBRAS E CRUZAMENTOS
+# CAMADAS DE OBRAS E CRUZAMENTOS COM ÁREAS
 # ==========================================
 dados_tabela_conflito = []
 
@@ -771,16 +791,20 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             for _, row in df_concluidas.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
                 sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4;">Obra Concluída</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}<br><br><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></div>"""
-                folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor='#1f77b4', fillOpacity=0.9, tooltip=f"Concluída: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=300)).add_to(cluster_todas)
+                areas_especiais = verificar_areas_da_obra(lat, lon) # INTEGRAÇÃO DO VERIFICADOR DE ÁREAS
+                
+                html_popup = f"""<div style="min-width: 250px;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4;">Obra Concluída</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}<br><br><span style="color:#555;font-size:12px;"><b>🌎 ÁREAS ESPECIAIS:</b><br>{areas_especiais}</span><br><br><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></div>"""
+                folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor='#1f77b4', fillOpacity=0.9, tooltip=f"Concluída: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=350)).add_to(cluster_todas)
         if df_andamento is not None:
             for _, row in df_andamento.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
                 cor = 'red' if row['CONFLITO'] else '#2ca02c'
                 titulo = "Conflito!" if row['CONFLITO'] else "Em Andamento"
                 sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor};">{titulo}</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}<br><br><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></div>"""
-                folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor=cor, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=300)).add_to(cluster_todas)
+                areas_especiais = verificar_areas_da_obra(lat, lon) # INTEGRAÇÃO DO VERIFICADOR DE ÁREAS
+                
+                html_popup = f"""<div style="min-width: 250px;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor};">{titulo}</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}<br><br><span style="color:#555;font-size:12px;"><b>🌎 ÁREAS ESPECIAIS:</b><br>{areas_especiais}</span><br><br><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></div>"""
+                folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor=cor, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=350)).add_to(cluster_todas)
         cluster_todas.add_to(mapa)
 
     if mostrar_concluidas and df_concluidas is not None:
@@ -791,9 +815,11 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             cor_concluida = '#1f77b4'
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            areas_especiais = verificar_areas_da_obra(lat, lon) # INTEGRAÇÃO DO VERIFICADOR DE ÁREAS
+            
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1).add_to(fg_concluidas)
-            folium.Circle(location=[lat, lon], radius=50, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
+            folium.Circle(location=[lat, lon], radius=50, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=350)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
             
     if mostrar_conflitantes and df_andamento is not None:
@@ -805,6 +831,7 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             nome_nova = str(row.get('NOME', 'S/N'))
             nome_alvo = str(row.get('NOME_CONCLUIDA', 'S/N'))
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+            areas_especiais = verificar_areas_da_obra(lat, lon) # INTEGRAÇÃO DO VERIFICADOR DE ÁREAS
             
             dados_tabela_conflito.append({
                 "Protocolo (Nova)": protocolo, "Nome (Nova)": nome_nova,
@@ -814,30 +841,30 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
                 "Street View": sv_url
             })
                 
-            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: red; border-bottom: 2px solid red; padding-bottom: 5px;">🚨 CONFLITO DETECTADO</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr><tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr><tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
-            folium.CircleMarker(location=[lat, lon], radius=6, color='black', weight=1, fill=True, fillColor='red', fillOpacity=0.9, tooltip=f"Conflito: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_andamento)
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: red; border-bottom: 2px solid red; padding-bottom: 5px;">🚨 CONFLITO DETECTADO</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr><tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr><tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            folium.CircleMarker(location=[lat, lon], radius=6, color='black', weight=1, fill=True, fillColor='red', fillOpacity=0.9, tooltip=f"Conflito: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=350)).add_to(fg_andamento)
         fg_andamento.add_to(mapa)
 
 # ==========================================
-# 🌩️ INTEGRAÇÃO DO RADAR (CHUVA/NUVENS AO VIVO)
+# 🌩️ INTEGRAÇÃO DE RADARES EXTERNOS (STREET VIEW E CLIMA)
 # ==========================================
+# ✅ NOVA CAMADA: COBERTURA DO STREET VIEW (Renderiza os caminhos azuis do Google Maps)
+if mostrar_streetview:
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt?hl=pt-BR&lyrs=svv|cb_client:apiv3&x={x}&y={y}&z={z}',
+        attr='Google Maps Street View',
+        name='🛣️ Cobertura Street View',
+        overlay=True,
+        control=True,
+        opacity=0.75
+    ).add_to(mapa)
+
 if mostrar_clima:
     url_chuva, url_nuvem = obter_radar_chuva_url()
-    
     if url_nuvem:
-        folium.TileLayer(
-            tiles=url_nuvem, attr="RainViewer", name="☁️ Nuvens (Satélite Ao Vivo)",
-            overlay=True, control=True, opacity=0.4,
-            max_native_zoom=12, max_zoom=20
-        ).add_to(mapa)
-        
+        folium.TileLayer(tiles=url_nuvem, attr="RainViewer", name="☁️ Nuvens (Satélite Ao Vivo)", overlay=True, control=True, opacity=0.4, max_native_zoom=12, max_zoom=20).add_to(mapa)
     if url_chuva:
-        folium.TileLayer(
-            tiles=url_chuva, attr="RainViewer", name="🌧️ Chuvas Ao Vivo (Radar)",
-            overlay=True, control=True, opacity=0.6,
-            max_native_zoom=12, max_zoom=20
-        ).add_to(mapa)
-        
+        folium.TileLayer(tiles=url_chuva, attr="RainViewer", name="🌧️ Chuvas Ao Vivo (Radar)", overlay=True, control=True, opacity=0.6, max_native_zoom=12, max_zoom=20).add_to(mapa)
     if not url_chuva and not url_nuvem:
         st.sidebar.warning("⚠️ Serviço de radar climático temporariamente indisponível na API central.")
 
