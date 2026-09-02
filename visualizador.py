@@ -10,15 +10,14 @@ import math
 import requests
 import unicodedata
 import folium
-from folium.plugins import HeatMap, MarkerCluster, MeasureControl, Draw
+from folium.plugins import HeatMap, MarkerCluster
 import gc
 from streamlit_folium import st_folium
 import html
 from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
-import plotly.express as px
 
-st.set_page_config(page_title="Gestão de Malha e Projetos", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="Visualizador de Malha", page_icon="🗺️", layout="wide")
 
 if not os.path.exists("database/redes"):
     os.makedirs("database/redes", exist_ok=True)
@@ -49,7 +48,7 @@ def load_base_mapping():
     mun_to_reg = {}
     file_path = "MUNICIPIOS-REGIONAIS.xlsx"
     if not os.path.exists(file_path):
-        st.sidebar.error(f"🚨 Planilha '{file_path}' não encontrada!")
+        st.sidebar.error(f"🚨 Planilha '{file_path}' não encontrada! Verifique o nome.")
     else:
         try:
             df_base = pd.read_excel(file_path)
@@ -57,7 +56,7 @@ def load_base_mapping():
                 mun = remove_accents(str(row.get('MunicIpio', ''))).upper().strip()
                 reg = str(row.get('Regional', '')).strip().upper()
                 if mun and reg and reg != 'NAN': mun_to_reg[mun] = reg
-        except Exception as e: st.sidebar.error(f"🚨 Erro: {e}")
+        except Exception as e: st.sidebar.error(f"🚨 Erro ao ler a planilha: {e}")
     
     overrides_centro = ['SANTA LUZIA', 'CONCEICAO DO LAGO-ACU', 'CONCEICAO DO LAGO ACU', 'PINDARE-MIRIM', 'PINDARE MIRIM', 'OLHO DAGUA DAS CUNHAS', 'OLHO D\'AGUA DAS CUNHAS', 'GOVERNADOR LUIZ ROCHA']
     for mun in overrides_centro:
@@ -243,7 +242,7 @@ def carregar_banco_redes():
 @st.cache_data(show_spinner=False)
 def carregar_e_cruzar_obras():
     file_path = "BASE_LEVANTAMENTO_ATUALIZADA.xlsx"
-    if not os.path.exists(file_path): return "Arquivo 'BASE_LEVANTAMENTO_ATUALIZADA.xlsx' não encontrado.", None, None, None
+    if not os.path.exists(file_path): return "Arquivo 'BASE_LEVANTAMENTO_ATUALIZADA.xlsx' não encontrado.", None, None
         
     try:
         df_obras = pd.read_excel(file_path)
@@ -253,26 +252,19 @@ def carregar_e_cruzar_obras():
         lon_col = next((c for c in df_obras.columns if 'LONGITUDE' in str(c).upper() or 'LON' == str(c).upper()), None)
         
         if not all([status_sisco_col, status_list_col, lat_col, lon_col]):
-            return "Erro: Colunas obrigatórias ausentes na planilha.", None, None, None
+            return "Erro: Colunas obrigatórias ausentes na planilha (Status ou Coordenadas).", None, None
             
-        # Parse Data Abertura para Linha do Tempo
-        data_col = next((c for c in df_obras.columns if 'DATA ABERTURA' in str(c).upper()), None)
-        if data_col: df_obras['DATA_DT'] = pd.to_datetime(df_obras[data_col], errors='coerce')
-        else: df_obras['DATA_DT'] = pd.NaT
-
         if df_obras[lat_col].dtype == object: df_obras[lat_col] = df_obras[lat_col].astype(str).str.replace(',', '.')
         if df_obras[lon_col].dtype == object: df_obras[lon_col] = df_obras[lon_col].astype(str).str.replace(',', '.')
         df_obras['LAT_CLEAN'] = pd.to_numeric(df_obras[lat_col], errors='coerce')
         df_obras['LON_CLEAN'] = pd.to_numeric(df_obras[lon_col], errors='coerce')
+        df_obras = df_obras.dropna(subset=['LAT_CLEAN', 'LON_CLEAN'])
         
-        # ⚠️ DATA QUALITY MONITOR: Obras com GPS quebrado
         mask_valid_coords = (
-            (df_obras['LAT_CLEAN'].notnull()) & (df_obras['LON_CLEAN'].notnull()) & 
             (df_obras['LAT_CLEAN'] != 0.0) & (df_obras['LON_CLEAN'] != 0.0) & 
             (df_obras['LAT_CLEAN'] >= -35.0) & (df_obras['LAT_CLEAN'] <= 5.0) & 
             (df_obras['LON_CLEAN'] >= -75.0) & (df_obras['LON_CLEAN'] <= -30.0)
         )
-        df_invalidas = df_obras[~mask_valid_coords].copy()
         df_obras = df_obras[mask_valid_coords]
         
         mask_concluida = df_obras[status_sisco_col].astype(str).str.contains('CONCLU', case=False, na=False)
@@ -302,14 +294,25 @@ def carregar_e_cruzar_obras():
                     c_flags.append(False); c_protos.append(""); c_dists.append(0.0); c_nomes.append("")
             df_andamento['CONFLITO'], df_andamento['PROTOCOLO_CONFLITO'], df_andamento['DISTANCIA_CONFLITO'], df_andamento['NOME_CONCLUIDA'] = c_flags, c_protos, c_dists, c_nomes
             
-        return "OK", df_concluidas, df_andamento, df_invalidas
-    except Exception as e: return f"Erro processando dados: {str(e)}", None, None, None
+        return "OK", df_concluidas, df_andamento
+    except Exception as e: return f"Erro processando dados: {str(e)}", None, None
 
+# 🌩️ FUNÇÃO NOVA: Buscar Satélite de Chuva ao Vivo (RainViewer API)
+@st.cache_data(ttl=300) # Atualiza a cada 5 minutos
+def obter_radar_chuva_url():
+    try:
+        req = requests.get("https://api.rainviewer.com/public/weather-maps.json", timeout=5)
+        data = req.json()
+        path = data['radar']['past'][-1]['path'] # Pega o bloco mais recente
+        return f"https://tilecache.rainviewer.com{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"
+    except:
+        return None
 
 # ==========================================
 # 2. ESTRUTURA DA TELA E CONTAINERS
 # ==========================================
-st.markdown("<h2 style='color: #0D256C;'>🗺️ Gestão de Malha Elétrica e Obras (Inteligência Geográfica)</h2>", unsafe_allow_html=True)
+st.markdown("<h2 style='color: #0D256C;'>🗺️ Visualizador Oficial de Malha (Satélite Integrado)</h2>", unsafe_allow_html=True)
+st.markdown("O sistema usa **Inteligência Espacial** para descobrir o município e Scipy para pesquisa instantânea de coordenadas!")
 
 kpi_container = st.empty()
 map_container = st.empty()
@@ -403,37 +406,16 @@ with st.sidebar:
     mostrar_todas_obras = st.checkbox("📍 TODAS AS OBRAS (Clusters)", value=False)
     mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS (Raio 50m)", value=False)
     mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
-    mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
+    mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade)", value=False)
     
-    msg_obras, df_concluidas, df_andamento, df_invalidas = "OK", None, None, None
+    # 🌦️ CHECKBOX DO RADAR CLIMÁTICO
+    mostrar_clima = st.checkbox("🌦️ Radar Climático (Chuva Ao Vivo)", value=False)
+    
+    msg_obras, df_concluidas, df_andamento = "OK", None, None
     if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras:
-        msg_obras, df_concluidas, df_andamento, df_invalidas = carregar_e_cruzar_obras()
+        msg_obras, df_concluidas, df_andamento = carregar_e_cruzar_obras()
         if msg_obras != "OK": st.sidebar.warning(f"⚠️ {msg_obras}")
-        else:
-            # 🕒 FILTRO DE LINHA DO TEMPO (SLIDER)
-            val_mins, val_maxs = [], []
-            if df_concluidas is not None and not df_concluidas.empty: 
-                val_mins.append(df_concluidas['DATA_DT'].min()); val_maxs.append(df_concluidas['DATA_DT'].max())
-            if df_andamento is not None and not df_andamento.empty: 
-                val_mins.append(df_andamento['DATA_DT'].min()); val_maxs.append(df_andamento['DATA_DT'].max())
-                
-            val_mins = [d for d in val_mins if pd.notnull(d)]
-            val_maxs = [d for d in val_maxs if pd.notnull(d)]
-            
-            if val_mins and val_maxs:
-                st.markdown("<br>", unsafe_allow_html=True)
-                min_dt, max_dt = min(val_mins).date(), max(val_maxs).date()
-                if min_dt != max_dt:
-                    data_filtro = st.slider("🕒 Linha do Tempo (Data de Abertura):", min_value=min_dt, max_value=max_dt, value=(min_dt, max_dt), format="DD/MM/YY")
-                    if df_concluidas is not None and not df_concluidas.empty:
-                        mask_c = (df_concluidas['DATA_DT'].dt.date >= data_filtro[0]) & (df_concluidas['DATA_DT'].dt.date <= data_filtro[1])
-                        df_concluidas = df_concluidas[mask_c | df_concluidas['DATA_DT'].isnull()]
-                    if df_andamento is not None and not df_andamento.empty:
-                        mask_a = (df_andamento['DATA_DT'].dt.date >= data_filtro[0]) & (df_andamento['DATA_DT'].dt.date <= data_filtro[1])
-                        df_andamento = df_andamento[mask_a | df_andamento['DATA_DT'].isnull()]
 
-            qtd_conflitos = df_andamento['CONFLITO'].sum() if df_andamento is not None else 0
-            
     st.markdown("---")
     st.markdown("### 🗑️ Gerenciar Malha Local")
     alim_para_deletar = st.selectbox("Apagar Alimentador do Banco:", ["Selecione..."] + sorted(df['ALIMENTADOR'].unique().tolist()) if not df.empty else ["Selecione..."])
@@ -448,7 +430,7 @@ with st.sidebar:
                 st.rerun()
 
 # ==========================================
-# DASHBOARD DE INDICADORES E GRÁFICOS
+# DASHBOARD DE INDICADORES (KPIs PROFISSIONAIS)
 # ==========================================
 def render_kpi(icone, titulo, valor, cor_borda):
     return f"""
@@ -471,27 +453,11 @@ with kpi_container.container():
     c4.markdown(render_kpi("🚨", "CONFLITOS (50m)", val_conf, "#d62728"), unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # GRÁFICOS PLOTLY
-    if msg_obras == "OK" and val_conf > 0:
-        df_conf = df_andamento[df_andamento['CONFLITO']]
-        if not df_conf.empty:
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                fig1 = px.bar(df_conf['MUNICIPIO'].value_counts().reset_index(), x='MUNICIPIO', y='count', title="📍 Cidades com Mais Conflitos", color_discrete_sequence=['#d62728'])
-                fig1.update_layout(xaxis_title="", yaxis_title="Qtd de Obras em Conflito")
-                st.plotly_chart(fig1, use_container_width=True)
-            with col_chart2:
-                fig2 = px.pie(df_conf, names='STATUS LIST', title="📊 Status das Obras Sobrepostas", hole=0.4, color_discrete_sequence=['#ff7f0e', '#ffbb78', '#d62728'])
-                st.plotly_chart(fig2, use_container_width=True)
 
 # ==========================================
 # 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE)
 # ==========================================
 mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canvas=True)
-
-# FERRAMENTAS DE ENGENHARIA (Régua e Desenho)
-mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
-Draw(export=False, position='topleft').add_to(mapa)
 
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
@@ -510,6 +476,30 @@ if geo_data_ibge:
         return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
 
     folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
+
+    map_id = mapa.get_name()
+    js_zoom_hide = f"""
+    <script>
+        setTimeout(function() {{
+            var ibge_layer_{map_id} = null;
+            {map_id}.eachLayer(function(layer) {{
+                if (layer.options && layer.options.name === 'Divisão IBGE (Maranhão)') {{
+                    ibge_layer_{map_id} = layer;
+                }}
+            }});
+            {map_id}.on('zoomend', function() {{
+                if (ibge_layer_{map_id}) {{
+                    if ({map_id}.getZoom() > 9) {{
+                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.removeLayer(ibge_layer_{map_id}); }}
+                    }} else {{
+                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.addLayer(ibge_layer_{map_id}); }}
+                    }}
+                }}
+            }});
+        }}, 500);
+    </script>
+    """
+    mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
 
 todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
@@ -593,14 +583,14 @@ if not df.empty:
     fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
     for _, row in df_busca.iterrows():
         coord_txt = f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}" if row['TIPO_GEOMETRIA'] == 'Ponto' else "Linha de Múltiplos Pontos"
-        sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={row['COORDS'][0]},{row['COORDS'][1]}"
         html_popup = f"""
         <div style="min-width: 250px; font-family: sans-serif;">
             <h4 style="margin-top: 0; color: #FF00FF; border-bottom: 2px solid #FF00FF; padding-bottom: 5px;">{row['TIPO_REDE']}</h4>
             <table style="width:100%;">
                 <tr><td style="color: #555; padding: 2px;"><b>IDENTIFICAÇÃO:</b></td><td>{html.escape(str(row['NOME']))}</td></tr>
-                <tr><td style="color: #555; padding: 2px;"><b>LOCAL:</b></td><td>{html.escape(str(row['MUNICIPIO']))}</td></tr>
-                <tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr>
+                <tr><td style="color: #555; padding: 2px;"><b>ALIMENTADOR:</b></td><td>{html.escape(str(row['ALIMENTADOR']))}</td></tr>
+                <tr><td style="color: #555; padding: 2px;"><b>LOCAL:</b></td><td>{html.escape(str(row['MUNICIPIO']))} - {row['REGIONAL']}</td></tr>
+                <tr><td style="color: #555; padding: 2px;"><b>GPS:</b></td><td>{coord_txt}</td></tr>
             </table>
         </div>
         """
@@ -622,6 +612,18 @@ if mostrar_indigenas:
     geo_i = get_kml_cached("assets/indigenas.kml", "#2ca02c")
     if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
+if mostrar_arqueologia:
+    geo_a = get_kml_cached("assets/arqueologia.kml", "#1f77b4")
+    if geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4")).add_to(mapa)
+
+if mostrar_uc_federal:
+    geo_uc_fed = get_kml_cached("assets/uc_federal.kml", "#e6b800")
+    if geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+
+if mostrar_uc_estadual:
+    geo_uc_est = get_kml_cached("assets/uc_estadual.kml", "#ffff00")
+    if geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+
 
 # ==========================================
 # CAMADAS DE OBRAS E CRUZAMENTOS
@@ -629,7 +631,6 @@ if mostrar_indigenas:
 dados_tabela_conflito = []
 
 if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras) and msg_obras == "OK":
-    
     if mostrar_heatmap:
         heat_data = []
         if df_andamento is not None and not df_andamento.empty: heat_data.extend(df_andamento[['LAT_CLEAN', 'LON_CLEAN']].values.tolist())
@@ -637,43 +638,36 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
         if heat_data: HeatMap(heat_data, radius=15, blur=10, name="🔥 Densidade de Obras").add_to(mapa)
     
     protocolos_com_conflito = set()
-    if df_andamento is not None:
-        protocolos_com_conflito = set(df_andamento[df_andamento['CONFLITO']]['PROTOCOLO_CONFLITO'].astype(str))
+    if df_andamento is not None: protocolos_com_conflito = set(df_andamento[df_andamento['CONFLITO']]['PROTOCOLO_CONFLITO'].astype(str))
     
-    # TODAS AS OBRAS (CLUSTER GERAL)
     if mostrar_todas_obras:
         cluster_todas = MarkerCluster(name="Todas as Obras (Geral)")
         if df_concluidas is not None:
             for _, row in df_concluidas.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
-                sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4;">Obra Concluída</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}<br><br><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></div>"""
+                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4;">Obra Concluída</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}</div>"""
                 folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor='#1f77b4', fillOpacity=0.9, tooltip=f"Concluída: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=300)).add_to(cluster_todas)
         if df_andamento is not None:
             for _, row in df_andamento.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
                 cor = 'red' if row['CONFLITO'] else '#2ca02c'
                 titulo = "Conflito!" if row['CONFLITO'] else "Em Andamento"
-                sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor};">{titulo}</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}<br><br><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></div>"""
+                html_popup = f"""<div style="min-width: 200px;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor};">{titulo}</h4><b>PROTOCOLO:</b> {html.escape(str(row.get('PROTOCOLO', 'S/N')))}<br><b>NOME:</b> {html.escape(str(row.get('NOME', 'S/N')))}</div>"""
                 folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor=cor, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=300)).add_to(cluster_todas)
         cluster_todas.add_to(mapa)
 
-    # 1. Obras Concluídas Isoladas (Raio 50m)
     if mostrar_concluidas and df_concluidas is not None:
         fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Alvos)", show=True)
         for _, row in df_concluidas.iterrows():
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
             if protocolo not in protocolos_com_conflito: continue
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
-            sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
             cor_concluida = '#1f77b4'
-            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr></table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1).add_to(fg_concluidas)
             folium.Circle(location=[lat, lon], radius=50, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
             
-    # 2. Obras em Andamento (Conflitos Isolados)
     if mostrar_conflitantes and df_andamento is not None:
         fg_andamento = folium.FeatureGroup(name="Obras Conflitantes", show=True)
         for _, row in df_andamento.iterrows():
@@ -682,45 +676,32 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
             nome_nova = str(row.get('NOME', 'S/N'))
             nome_alvo = str(row.get('NOME_CONCLUIDA', 'S/N'))
-            sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
             
             dados_tabela_conflito.append({
                 "Protocolo (Nova)": protocolo, "Nome (Nova)": nome_nova,
                 "Conflito (Alvo)": row['PROTOCOLO_CONFLITO'], "Nome (Concluída)": nome_alvo,
                 "Distância (m)": f"{row['DISTANCIA_CONFLITO']:.1f}m", "Latitude": lat, "Longitude": lon,
-                "Google Maps": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}",
-                "Street View": sv_url
+                "Google Maps": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
             })
                 
-            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: red; border-bottom: 2px solid red; padding-bottom: 5px;">🚨 CONFLITO DETECTADO</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr><tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr><tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: red; border-bottom: 2px solid red; padding-bottom: 5px;">🚨 CONFLITO DETECTADO</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr><tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr><tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr></table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=6, color='black', weight=1, fill=True, fillColor='red', fillOpacity=0.9, tooltip=f"Conflito: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_andamento)
         fg_andamento.add_to(mapa)
 
+# ==========================================
+# 🌩️ INTEGRAÇÃO DO RADAR CLIMÁTICO (CHUVA AO VIVO)
+# ==========================================
+if mostrar_clima:
+    rv_url = obter_radar_chuva_url()
+    if rv_url:
+        folium.TileLayer(
+            tiles=rv_url, attr="RainViewer", name="🌧️ Chuvas Ao Vivo (Radar)",
+            overlay=True, control=True, opacity=0.55
+        ).add_to(mapa)
+    else:
+        st.sidebar.warning("⚠️ Serviço de radar climático temporariamente indisponível na API central.")
+
 folium.LayerControl(position='topright').add_to(mapa)
-
-# ==========================================
-# ⚡ CRUZAMENTO COM A MALHA (.KMZ)
-# ==========================================
-if len(dados_tabela_conflito) > 0 and not df.empty:
-    df_malha_filtro = df.copy()
-    if alimentadores_visiveis: df_malha_filtro = df_malha_filtro[df_malha_filtro['ALIMENTADOR'].isin(alimentadores_visiveis)]
-    if not df_malha_filtro.empty:
-        grid_pts, grid_info = [], []
-        for idx, row in df_malha_filtro.iterrows():
-            if row['TIPO_GEOMETRIA'] == 'Ponto':
-                grid_pts.append(latlon_to_xyz(row['COORDS'][0], row['COORDS'][1]))
-                grid_info.append(f"{row['TIPO_REDE']} ({row['NOME']})")
-            else:
-                for pt in row['COORDS']:
-                    grid_pts.append(latlon_to_xyz(pt[0], pt[1]))
-                    grid_info.append(f"{row['TIPO_REDE']} ({row['NOME']})")
-        if grid_pts:
-            tree_grid = cKDTree(grid_pts)
-            for conflito in dados_tabela_conflito:
-                xyz = latlon_to_xyz(conflito['Latitude'], conflito['Longitude'])
-                _, idx_prox = tree_grid.query(xyz)
-                conflito['Rede Próxima'] = grid_info[idx_prox]
-
 
 # -------------------------------------------------------------
 # 5. TABELA INTELIGENTE E BOTÃO DE EXPORTAÇÃO
@@ -731,36 +712,21 @@ with table_container:
     if mostrar_conflitantes and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
         st.markdown("---")
         st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
-        st.markdown("💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
+        st.markdown("As obras abaixo estão em andamento, mas encontram-se no raio de 50 metros de uma obra já dada como concluída.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para dar zoom exato na obra no mapa!", unsafe_allow_html=True)
         
         df_tabela = pd.DataFrame(dados_tabela_conflito)
         try:
             event = st.dataframe(
                 df_tabela, use_container_width=True, on_select="rerun", selection_mode="single_row",
-                column_config={
-                    "Google Maps": st.column_config.LinkColumn("📍 Rota Geográfica", display_text="Abrir Maps"),
-                    "Street View": st.column_config.LinkColumn("👁️ Visão de Rua", display_text="Abrir 360º")
-                }
+                column_config={"Google Maps": st.column_config.LinkColumn("📍 Rota Geográfica", display_text="Abrir Maps")}
             )
             if hasattr(event, 'selection') and event.selection.rows:
                 idx = event.selection.rows[0]
-                zoom_lat = float(df_tabela.iloc[idx]['Latitude'])
-                zoom_lon = float(df_tabela.iloc[idx]['Longitude'])
-        except Exception:
-            st.dataframe(df_tabela, use_container_width=True)
+                zoom_lat, zoom_lon = float(df_tabela.iloc[idx]['Latitude']), float(df_tabela.iloc[idx]['Longitude'])
+        except Exception: st.dataframe(df_tabela, use_container_width=True)
         
         csv = df_tabela.to_csv(index=False).encode('utf-8-sig')
         st.download_button(label="📥 Baixar Relatório (CSV)", data=csv, file_name="conflitos.csv", mime="text/csv", type="primary")
-
-    # ⚠️ ABA DE DATA QUALITY (Obras com erro de GPS)
-    if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras) and msg_obras == "OK":
-        if df_invalidas is not None and not df_invalidas.empty:
-            st.markdown("---")
-            with st.expander(f"⚠️ Monitor de Qualidade de Dados ({len(df_invalidas)} Inconsistências na Planilha)"):
-                st.markdown("As obras abaixo foram **ignoradas no mapa** porque estão com o GPS em branco, zerado (0,0) ou fora do território brasileiro. Corrija na planilha SISCO para que elas sejam processadas.")
-                cols_to_show = [c for c in ['PROTOCOLO', 'TIPO NOTA', 'MUNICIPIO', 'LATITUDE', 'LONGITUDE', 'STATUS SISCO'] if c in df_invalidas.columns]
-                st.dataframe(df_invalidas[cols_to_show], use_container_width=True)
-
 
 # -------------------------------------------------------------
 # 6. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL DO MAPA
