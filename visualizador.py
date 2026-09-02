@@ -358,7 +358,6 @@ def preprocessar_bboxes_kml(geo_data):
 
 geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00"); preprocessar_bboxes_kml(geo_q)
 geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c"); preprocessar_bboxes_kml(geo_i)
-# (CORRIGIDO): Cor alterada de azul para marrom escuro para não confundir com as Obras
 geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b"); preprocessar_bboxes_kml(geo_a)
 geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800"); preprocessar_bboxes_kml(geo_uc_fed)
 geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_est)
@@ -555,11 +554,16 @@ with kpi_container.container():
         if not df_conf.empty:
             col_chart1, col_chart2 = st.columns(2)
             with col_chart1:
-                fig1 = px.bar(df_conf['MUNICIPIO_NORM'].value_counts().reset_index(), x='MUNICIPIO_NORM', y='count', title="📍 Cidades com Mais Conflitos", color_discrete_sequence=['#d62728'])
+                # Modificação 1: Adicionado o valor de contagem no topo da barra
+                df_barras = df_conf['MUNICIPIO_NORM'].value_counts().reset_index()
+                fig1 = px.bar(df_barras, x='MUNICIPIO_NORM', y='count', title="📍 Cidades com Mais Conflitos", color_discrete_sequence=['#d62728'], text='count')
+                fig1.update_traces(textposition='outside')
                 fig1.update_layout(xaxis_title="", yaxis_title="Qtd de Obras em Conflito")
                 st.plotly_chart(fig1, use_container_width=True)
             with col_chart2:
+                # Modificação 2: Quantidade numérica correspondente direcionada na fatia
                 fig2 = px.pie(df_conf, names='STATUS LIST', title="📊 Status das Obras Sobrepostas", hole=0.4, color_discrete_sequence=['#ff7f0e', '#ffbb78', '#d62728'])
+                fig2.update_traces(textposition='outside', textinfo='value+percent')
                 st.plotly_chart(fig2, use_container_width=True)
 
 # ==========================================
@@ -853,7 +857,6 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
 # ==========================================
 # 🌩️ INTEGRAÇÃO DE RADARES EXTERNOS (STREET VIEW E CLIMA)
 # ==========================================
-# (CORRIGIDO): URL bruta da API do Google, sem caracteres especiais, para habilitar a camada azul do Street View
 if mostrar_streetview:
     folium.TileLayer(
         tiles='https://mt1.google.com/vt/lyrs=svv&x={x}&y={y}&z={z}',
