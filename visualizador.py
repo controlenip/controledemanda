@@ -10,7 +10,6 @@ import math
 import requests
 import unicodedata
 import folium
-from folium.plugins import MarkerCluster
 import gc
 from streamlit_folium import st_folium
 import html
@@ -501,19 +500,24 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
-    mostrar_obras = st.checkbox("🟢 Cruzamento de Obras (Detecção 100m)", value=False)
+    mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS", value=False)
+    mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES", value=False)
     
     msg_obras, df_concluidas, df_andamento = "OK", None, None
-    if mostrar_obras:
+    if mostrar_concluidas or mostrar_conflitantes:
         msg_obras, df_concluidas, df_andamento = carregar_e_cruzar_obras()
         if msg_obras != "OK":
             st.sidebar.warning(f"⚠️ {msg_obras}")
         else:
             qtd_conflitos = df_andamento['CONFLITO'].sum()
-            st.sidebar.success(f"✅ {len(df_concluidas)} Concluídas (Raios)")
-            st.sidebar.info(f"✅ {len(df_andamento)} Em Andamento (Clusters)")
-            if qtd_conflitos > 0:
-                st.sidebar.error(f"🚨 {qtd_conflitos} OBRAS EM CONFLITO!")
+            
+            if mostrar_concluidas:
+                st.sidebar.success(f"🔵 {len(df_concluidas)} Concluídas no mapa")
+            if mostrar_conflitantes:
+                if qtd_conflitos > 0:
+                    st.sidebar.error(f"🚨 {qtd_conflitos} CONFLITOS MAPEADOS!")
+                else:
+                    st.sidebar.success("🎉 Nenhuma obra em conflito!")
             
     st.markdown("---")
     st.markdown("### 🗑️ Gerenciar Malha Local")
@@ -740,19 +744,21 @@ if mostrar_uc_municipal:
     if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 
-# Obras com CLUSTER E NOVAS CORES
+# ==========================================
+# CAMADAS DE OBRAS OTIMIZADAS
+# ==========================================
 dados_tabela_conflito = []
 
-if mostrar_obras and msg_obras == "OK":
-    if df_concluidas is not None:
-        fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Raios)", show=True)
+if (mostrar_concluidas or mostrar_conflitantes) and msg_obras == "OK":
+    
+    # 1. Desenha Obras Concluídas (SE A CAIXA ESTIVER MARCADA)
+    if mostrar_concluidas and df_concluidas is not None:
+        fg_concluidas = folium.FeatureGroup(name="Obras Concluídas", show=True)
         for _, row in df_concluidas.iterrows():
-            lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
+            lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             municipio = str(row.get('MUNICIPIO', 'S/N'))
-            
-            # Azul sólido (Hexadecimal do Folium Default Blue)
-            cor_concluida = '#1f77b4'
+            cor_concluida = '#1f77b4' # Azul
             
             html_popup = f"""
             <div style="min-width: 200px; font-family: sans-serif;">
@@ -764,12 +770,10 @@ if mostrar_obras and msg_obras == "OK":
             </div>
             """
             
-            # Ponto Central: Contorno Preto, Fundo Azul
             folium.CircleMarker(
                 location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1
             ).add_to(fg_concluidas)
             
-            # Raio de 100m: Azul translúcido
             folium.Circle(
                 location=[lat, lon], radius=100, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, 
                 tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
@@ -777,33 +781,31 @@ if mostrar_obras and msg_obras == "OK":
             
         fg_concluidas.add_to(mapa)
             
-    if df_andamento is not None:
-        cluster_andamento = MarkerCluster(name="Obras em Andamento (Cluster)")
+    # 2. Desenha Obras em Andamento Conflitantes (SE A CAIXA ESTIVER MARCADA)
+    if mostrar_conflitantes and df_andamento is not None:
+        fg_andamento = folium.FeatureGroup(name="Obras Conflitantes", show=True)
         
         for _, row in df_andamento.iterrows():
+            # Filtra apenas quem tem conflito
+            if not row['CONFLITO']:
+                continue
+                
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
             status_list = str(row.get('STATUS LIST', 'S/N'))
             
-            if row['CONFLITO']:
-                # Em Conflito: Contorno Preto, Fundo Vermelho
-                cor_ponto = 'red'
-                titulo = "🚨 CONFLITO DETECTADO"
-                info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
-                
-                dados_tabela_conflito.append({
-                    "Protocolo (Nova)": protocolo,
-                    "Status (Nova)": status_list,
-                    "Conflito (Alvo Concluída)": row['PROTOCOLO_CONFLITO'],
-                    "Distância do Centro (m)": f"{row['DISTANCIA_CONFLITO']:.1f}m",
-                    "Latitude": lat,
-                    "Longitude": lon
-                })
-            else:
-                # Em andamento s/ Conflito: Contorno Preto, Fundo Verde
-                cor_ponto = '#2ca02c' # Verde
-                titulo = "Obra em Andamento"
-                info_extra = ""
+            cor_ponto = 'red'
+            titulo = "🚨 CONFLITO DETECTADO"
+            info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
+            
+            dados_tabela_conflito.append({
+                "Protocolo (Nova)": protocolo,
+                "Status (Nova)": status_list,
+                "Conflito (Alvo Concluída)": row['PROTOCOLO_CONFLITO'],
+                "Distância do Centro (m)": f"{row['DISTANCIA_CONFLITO']:.1f}m",
+                "Latitude": lat,
+                "Longitude": lon
+            })
                 
             html_popup = f"""
             <div style="min-width: 250px; font-family: sans-serif;">
@@ -818,7 +820,7 @@ if mostrar_obras and msg_obras == "OK":
             
             folium.CircleMarker(
                 location=[lat, lon], 
-                radius=6 if row['CONFLITO'] else 4, 
+                radius=6, 
                 color='black', 
                 weight=1, 
                 fill=True, 
@@ -826,19 +828,19 @@ if mostrar_obras and msg_obras == "OK":
                 fillOpacity=0.9,
                 tooltip=f"{titulo}: {html.escape(protocolo)}", 
                 popup=folium.Popup(html_popup, max_width=300)
-            ).add_to(cluster_andamento)
+            ).add_to(fg_andamento)
             
-        cluster_andamento.add_to(mapa)
+        fg_andamento.add_to(mapa)
 
 folium.LayerControl(position='topright').add_to(mapa)
 
 # -------------------------------------------------------------
-# 4. CAPTURANDO CLIQUE NA TABELA (RODA ANTES DE DESENHAR O MAPA)
+# 4. CAPTURANDO CLIQUE NA TABELA
 # -------------------------------------------------------------
 zoom_lat, zoom_lon = None, None
 
 with table_container:
-    if mostrar_obras and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
+    if mostrar_conflitantes and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
         st.markdown("---")
         st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
         st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 100 metros** de uma obra já dada como concluída no SISCO.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
