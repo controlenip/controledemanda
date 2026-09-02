@@ -350,6 +350,7 @@ def carregar_e_cruzar_obras():
         df_andamento['CONFLITO'] = False
         df_andamento['PROTOCOLO_CONFLITO'] = ""
         df_andamento['DISTANCIA_CONFLITO'] = 0.0
+        df_andamento['NOME_CONCLUIDA'] = ""
         
         if not df_concluidas.empty and not df_andamento.empty:
             pts_concluidas = [latlon_to_xyz(row['LAT_CLEAN'], row['LON_CLEAN']) for _, row in df_concluidas.iterrows()]
@@ -358,6 +359,7 @@ def carregar_e_cruzar_obras():
             conflitos_flags = []
             conflitos_protos = []
             conflitos_dists = []
+            conflitos_nomes = []
             
             for _, row in df_andamento.iterrows():
                 xyz = latlon_to_xyz(row['LAT_CLEAN'], row['LON_CLEAN'])
@@ -366,19 +368,21 @@ def carregar_e_cruzar_obras():
                 obra_concluida_proxima = df_concluidas.iloc[idx_mais_proximo]
                 distancia_exata_m = haversine(row['LAT_CLEAN'], row['LON_CLEAN'], obra_concluida_proxima['LAT_CLEAN'], obra_concluida_proxima['LON_CLEAN']) * 1000
                 
-                # RAIO DETECTADO ATUALIZADO PARA 50m
                 if distancia_exata_m <= 50:
                     conflitos_flags.append(True)
                     conflitos_protos.append(str(obra_concluida_proxima.get('PROTOCOLO', 'S/N')))
                     conflitos_dists.append(distancia_exata_m)
+                    conflitos_nomes.append(str(obra_concluida_proxima.get('NOME', 'S/N')))
                 else:
                     conflitos_flags.append(False)
                     conflitos_protos.append("")
                     conflitos_dists.append(0.0)
+                    conflitos_nomes.append("")
                     
             df_andamento['CONFLITO'] = conflitos_flags
             df_andamento['PROTOCOLO_CONFLITO'] = conflitos_protos
             df_andamento['DISTANCIA_CONFLITO'] = conflitos_dists
+            df_andamento['NOME_CONCLUIDA'] = conflitos_nomes
             
         return "OK", df_concluidas, df_andamento
         
@@ -507,7 +511,6 @@ with st.sidebar:
         if msg_obras != "OK":
             st.sidebar.warning(f"⚠️ {msg_obras}")
         else:
-            # FILTRO TEMPORAL NOVO
             if 'DATA ABERTURA' in df_andamento.columns:
                 df_andamento['DATA ABERTURA_DT'] = pd.to_datetime(df_andamento['DATA ABERTURA'], errors='coerce')
                 min_date = df_andamento['DATA ABERTURA_DT'].dropna().min()
@@ -692,13 +695,12 @@ if mostrar_indigenas:
 
 
 # ==========================================
-# CAMADAS DE OBRAS OTIMIZADAS (50 METROS)
+# CAMADAS DE OBRAS OTIMIZADAS E CRUZAMENTOS
 # ==========================================
 dados_tabela_conflito = []
 
 if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap) and msg_obras == "OK":
     
-    # 🔥 Novo: Mapa de Calor (Densidade)
     if mostrar_heatmap:
         heat_data = []
         if df_andamento is not None and not df_andamento.empty: heat_data.extend(df_andamento[['LAT_CLEAN', 'LON_CLEAN']].values.tolist())
@@ -718,15 +720,15 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap) and msg_obras
 
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             municipio = str(row.get('MUNICIPIO', 'S/N'))
+            nome_concluida = str(row.get('NOME', 'S/N'))
             cor_concluida = '#1f77b4' # Azul
             
-            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 200px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(nome_concluida)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr></table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1).add_to(fg_concluidas)
-            # RAIO REDUZIDO PARA 50 METROS AQUI
             folium.Circle(location=[lat, lon], radius=50, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
             
-    # 2. Desenha Obras em Andamento (Apenas Vermelhas/Conflitantes)
+    # 2. Desenha Obras em Andamento (Conflitos)
     if mostrar_conflitantes and df_andamento is not None:
         fg_andamento = folium.FeatureGroup(name="Obras Conflitantes", show=True)
         
@@ -735,22 +737,28 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap) and msg_obras
                 
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
-            status_list = str(row.get('STATUS LIST', 'S/N'))
+            nome_nova = str(row.get('NOME', 'S/N'))
+            nome_alvo = str(row.get('NOME_CONCLUIDA', 'S/N'))
+            
             cor_ponto = 'red'
             titulo = "🚨 CONFLITO DETECTADO"
-            info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
+            info_extra = f"""
+            <tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>
+            <tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr>
+            """
             
             dados_tabela_conflito.append({
                 "Protocolo (Nova)": protocolo,
-                "Status (Nova)": status_list,
+                "Nome (Nova)": nome_nova,
                 "Conflito (Alvo Concluída)": row['PROTOCOLO_CONFLITO'],
+                "Nome (Concluída)": nome_alvo,
                 "Distância do Centro (m)": f"{row['DISTANCIA_CONFLITO']:.1f}m",
                 "Latitude": lat,
                 "Longitude": lon,
                 "Google Maps": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
             })
                 
-            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_ponto}; border-bottom: 2px solid {cor_ponto}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>STATUS:</b></td><td>{html.escape(status_list)}</td></tr>{info_extra}</table></div>"""
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_ponto}; border-bottom: 2px solid {cor_ponto}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr>{info_extra}</table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=6, color='black', weight=1, fill=True, fillColor=cor_ponto, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_andamento)
         fg_andamento.add_to(mapa)
 
@@ -759,7 +767,6 @@ folium.LayerControl(position='topright').add_to(mapa)
 # ==========================================
 # ⚡ CRUZAMENTO COM A MALHA (.KMZ)
 # ==========================================
-# Identifica qual Poste/Trafo está perto do conflito para colocar na tabela
 if len(dados_tabela_conflito) > 0 and not df.empty:
     df_malha_filtro = df.copy()
     if alimentadores_visiveis: df_malha_filtro = df_malha_filtro[df_malha_filtro['ALIMENTADOR'].isin(alimentadores_visiveis)]
@@ -812,7 +819,6 @@ with table_container:
         except Exception:
             st.dataframe(df_tabela, use_container_width=True)
         
-        # 📥 BOTÃO NATIVO DE EXPORTAÇÃO EXCEL/CSV
         csv = df_tabela.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 Baixar Relatório Completo de Conflitos (CSV)",
