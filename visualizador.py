@@ -390,10 +390,6 @@ def carregar_e_cruzar_obras():
 st.markdown("<h2 style='color: #0D256C;'>🗺️ Visualizador Oficial de Malha (Satélite Integrado)</h2>", unsafe_allow_html=True)
 st.markdown("O sistema usa **Inteligência Espacial** para descobrir o município e Scipy para pesquisa instantânea de coordenadas!")
 
-# -------------------------------------------------------------
-# RESERVANDO ESPAÇOS: MAPA EM CIMA, TABELA EMBAIXO
-# A tabela será processada antes para atualizar o zoom do mapa
-# -------------------------------------------------------------
 map_container = st.empty()
 table_container = st.container()
 
@@ -744,7 +740,7 @@ if mostrar_uc_municipal:
     if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 
-# Obras com CLUSTER
+# Obras com CLUSTER E NOVAS CORES
 dados_tabela_conflito = []
 
 if mostrar_obras and msg_obras == "OK":
@@ -755,9 +751,12 @@ if mostrar_obras and msg_obras == "OK":
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
             municipio = str(row.get('MUNICIPIO', 'S/N'))
             
+            # Azul sólido (Hexadecimal do Folium Default Blue)
+            cor_concluida = '#1f77b4'
+            
             html_popup = f"""
             <div style="min-width: 200px; font-family: sans-serif;">
-                <h4 style="margin-top: 0; color: #2ca02c; border-bottom: 2px solid #2ca02c; padding-bottom: 5px;">Obra Concluída</h4>
+                <h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">Obra Concluída</h4>
                 <table style="width:100%;">
                     <tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr>
                     <tr><td style="color: #555; padding: 2px;"><b>MUNICÍPIO:</b></td><td>{html.escape(municipio)}</td></tr>
@@ -765,8 +764,17 @@ if mostrar_obras and msg_obras == "OK":
             </div>
             """
             
-            folium.CircleMarker(location=[lat, lon], radius=3, color='black', fill=True, fillColor='black', fillOpacity=1).add_to(fg_concluidas)
-            folium.Circle(location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
+            # Ponto Central: Contorno Preto, Fundo Azul
+            folium.CircleMarker(
+                location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1
+            ).add_to(fg_concluidas)
+            
+            # Raio de 100m: Azul translúcido
+            folium.Circle(
+                location=[lat, lon], radius=100, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, 
+                tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
+            ).add_to(fg_concluidas)
+            
         fg_concluidas.add_to(mapa)
             
     if df_andamento is not None:
@@ -778,6 +786,7 @@ if mostrar_obras and msg_obras == "OK":
             status_list = str(row.get('STATUS LIST', 'S/N'))
             
             if row['CONFLITO']:
+                # Em Conflito: Contorno Preto, Fundo Vermelho
                 cor_ponto = 'red'
                 titulo = "🚨 CONFLITO DETECTADO"
                 info_extra = f"<tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr>"
@@ -791,7 +800,8 @@ if mostrar_obras and msg_obras == "OK":
                     "Longitude": lon
                 })
             else:
-                cor_ponto = '#1f77b4' 
+                # Em andamento s/ Conflito: Contorno Preto, Fundo Verde
+                cor_ponto = '#2ca02c' # Verde
                 titulo = "Obra em Andamento"
                 info_extra = ""
                 
@@ -807,8 +817,15 @@ if mostrar_obras and msg_obras == "OK":
             """
             
             folium.CircleMarker(
-                location=[lat, lon], radius=6 if row['CONFLITO'] else 4, color=cor_ponto, fill=True, fillColor=cor_ponto, fillOpacity=0.9,
-                tooltip=f"{titulo}: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
+                location=[lat, lon], 
+                radius=6 if row['CONFLITO'] else 4, 
+                color='black', 
+                weight=1, 
+                fill=True, 
+                fillColor=cor_ponto, 
+                fillOpacity=0.9,
+                tooltip=f"{titulo}: {html.escape(protocolo)}", 
+                popup=folium.Popup(html_popup, max_width=300)
             ).add_to(cluster_andamento)
             
         cluster_andamento.add_to(mapa)
@@ -840,7 +857,6 @@ with table_container:
                 zoom_lat = float(df_tabela.iloc[idx]['Latitude'])
                 zoom_lon = float(df_tabela.iloc[idx]['Longitude'])
         except Exception:
-            # Caso a versão do Streamlit seja muito antiga
             st.dataframe(df_tabela, use_container_width=True)
             escolha = st.selectbox("📌 O seu sistema Streamlit está desatualizado. Use esta caixa para selecionar a obra e dar zoom:", ["Nenhum"] + df_tabela['Protocolo (Nova)'].astype(str).tolist())
             if escolha != "Nenhum":
@@ -851,7 +867,6 @@ with table_container:
 # -------------------------------------------------------------
 # 5. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL
 # -------------------------------------------------------------
-# Zoom prioritário (Se clicar na tabela, a caixa visual engloba exatos 220 metros ao redor do ponto)
 if zoom_lat is not None and zoom_lon is not None:
     mapa.fit_bounds([[zoom_lat - 0.001, zoom_lon - 0.001], [zoom_lat + 0.001, zoom_lon + 0.001]])
 elif busca_lat is not None and busca_lon is not None:
@@ -873,6 +888,5 @@ elif municipios_sel and geo_data_ibge:
 elif todas_lats and todas_lons: 
     mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
 
-# Finalmente manda o mapa pronto para o espaço de cima
 with map_container:
     st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
