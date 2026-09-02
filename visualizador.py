@@ -364,7 +364,8 @@ def carregar_e_cruzar_obras():
                 obra_concluida_proxima = df_concluidas.iloc[idx_mais_proximo]
                 distancia_exata_m = haversine(row['LAT_CLEAN'], row['LON_CLEAN'], obra_concluida_proxima['LAT_CLEAN'], obra_concluida_proxima['LON_CLEAN']) * 1000
                 
-                if distancia_exata_m <= 100:
+                # RAIO AUMENTADO PARA 150 METROS AQUI
+                if distancia_exata_m <= 150:
                     conflitos_flags.append(True)
                     conflitos_protos.append(str(obra_concluida_proxima.get('PROTOCOLO', 'S/N')))
                     conflitos_dists.append(distancia_exata_m)
@@ -745,17 +746,27 @@ if mostrar_uc_municipal:
 
 
 # ==========================================
-# CAMADAS DE OBRAS OTIMIZADAS
+# CAMADAS DE OBRAS OTIMIZADAS (SÓ MOSTRA CONFLITOS!)
 # ==========================================
 dados_tabela_conflito = []
 
 if (mostrar_concluidas or mostrar_conflitantes) and msg_obras == "OK":
     
-    # 1. Desenha Obras Concluídas (SE A CAIXA ESTIVER MARCADA)
+    # Prepara a lista de protocolos em conflito
+    protocolos_com_conflito = set()
+    if df_andamento is not None:
+        protocolos_com_conflito = set(df_andamento[df_andamento['CONFLITO']]['PROTOCOLO_CONFLITO'].astype(str))
+    
+    # 1. Desenha Obras Concluídas (Apenas os Alvos do Conflito)
     if mostrar_concluidas and df_concluidas is not None:
-        fg_concluidas = folium.FeatureGroup(name="Obras Concluídas", show=True)
+        fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Alvos)", show=True)
         for _, row in df_concluidas.iterrows():
             protocolo = str(row.get('PROTOCOLO', 'S/N'))
+            
+            # Pula as obras concluídas que estão "livres"
+            if protocolo not in protocolos_com_conflito:
+                continue
+
             lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
             municipio = str(row.get('MUNICIPIO', 'S/N'))
             cor_concluida = '#1f77b4' # Azul
@@ -774,19 +785,19 @@ if (mostrar_concluidas or mostrar_conflitantes) and msg_obras == "OK":
                 location=[lat, lon], radius=4, color='black', weight=1, fill=True, fillColor=cor_concluida, fillOpacity=1
             ).add_to(fg_concluidas)
             
+            # RAIO ATUALIZADO AQUI
             folium.Circle(
-                location=[lat, lon], radius=100, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, 
+                location=[lat, lon], radius=150, color=cor_concluida, weight=2, fill=True, fillColor=cor_concluida, fillOpacity=0.25, 
                 tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)
             ).add_to(fg_concluidas)
             
         fg_concluidas.add_to(mapa)
             
-    # 2. Desenha Obras em Andamento Conflitantes (SE A CAIXA ESTIVER MARCADA)
+    # 2. Desenha Obras em Andamento (Apenas Vermelhas/Conflitantes)
     if mostrar_conflitantes and df_andamento is not None:
         fg_andamento = folium.FeatureGroup(name="Obras Conflitantes", show=True)
         
         for _, row in df_andamento.iterrows():
-            # Filtra apenas quem tem conflito
             if not row['CONFLITO']:
                 continue
                 
@@ -843,7 +854,9 @@ with table_container:
     if mostrar_conflitantes and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
         st.markdown("---")
         st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
-        st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 100 metros** de uma obra já dada como concluída no SISCO.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
+        
+        # TEXTO DA TABELA ATUALIZADO PARA 150 METROS
+        st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 150 metros** de uma obra já dada como concluída no SISCO.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
         
         df_tabela = pd.DataFrame(dados_tabela_conflito)
         
