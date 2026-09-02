@@ -644,10 +644,17 @@ js_draw_loc = """
 """
 mapa.get_root().html.add_child(folium.Element(js_draw_loc))
 
-# Camadas base claras e escuras
+# Camadas base claras e escuras (CORRIGIDO PARA URL PÚBLICA SEM MARCA D'ÁGUA)
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
-folium.TileLayer(tiles='CartoDB dark_matter', name='Mapa Base (Escuro - Foco em Redes)', overlay=False, control=True, max_zoom=20).add_to(mapa)
+folium.TileLayer(
+    tiles='https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    attr='&copy; OpenStreetMap &copy; CARTO',
+    name='Mapa Base (Escuro - Foco em Redes)',
+    overlay=False,
+    control=True,
+    max_zoom=20
+).add_to(mapa)
 
 if geo_data_ibge:
     def style_function(feature):
@@ -807,7 +814,7 @@ if not df.empty:
     fg_busca.add_to(mapa)
 
 else:
-    tree_grid = None # Evita erros se a malha ainda não foi carregada no filtro
+    tree_grid = None
 
 def calcular_rede_proxima(lat, lon):
     if not tree_grid: return "<span style='color:gray'>Ative um alimentador no filtro para calcular</span>"
