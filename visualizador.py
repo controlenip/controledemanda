@@ -17,14 +17,44 @@ import html
 from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
 import plotly.express as px
+import sqlite3
+import json
 
 st.set_page_config(page_title="Gestão de Malha e Projetos", page_icon="🗺️", layout="wide")
 
-if not os.path.exists("database/redes"):
-    os.makedirs("database/redes", exist_ok=True)
+# ==========================================
+# 1. MOTOR DE BANCO DE DADOS (SQLITE MIGRATION)
+# ==========================================
+def init_db_and_migrate():
+    if not os.path.exists("database"):
+        os.makedirs("database", exist_ok=True)
+    
+    conn = sqlite3.connect("database/redes.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS malha
+                 (ALIMENTADOR TEXT, REGIONAL TEXT, MUNICIPIO TEXT,
+                  TIPO_GEOMETRIA TEXT, TIPO_REDE TEXT, NOME TEXT,
+                  COORDS TEXT, COR TEXT)''')
+    conn.commit()
+    
+    # Migração invisível: transforma seus velhos .pkl no novo formato ultrarrápido SQLite
+    if os.path.exists("database/redes"):
+        pkl_files = [f for f in os.listdir("database/redes") if f.endswith('.pkl')]
+        for f in pkl_files:
+            try:
+                caminho_pkl = f"database/redes/{f}"
+                df_pkl = pd.read_pickle(caminho_pkl)
+                df_pkl['COORDS'] = df_pkl['COORDS'].apply(json.dumps)
+                df_pkl.to_sql('malha', conn, if_exists='append', index=False)
+                os.remove(caminho_pkl) # Apaga o arquivo antigo após migrar
+            except Exception:
+                pass
+    conn.close()
+
+init_db_and_migrate()
 
 # ==========================================
-# 1. FUNÇÕES BASE, PLANILHA E GEOLOCALIZAÇÃO
+# 2. FUNÇÕES BASE, PLANILHA E GEOLOCALIZAÇÃO
 # ==========================================
 def remove_accents(input_str):
     nfkd_form = unicodedata.normalize('NFKD', str(input_str))
@@ -153,8 +183,6 @@ def get_kml_cached(path, color):
 def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
     dict_cores = {'REDE PRIMÁRIA': '#e6194b', 'REDE PRIMARIA': '#e6194b', 'REDE SECUNDÁRIA': '#4363d8', 'REDE SECUNDARIA': '#4363d8', 'POSTE': '#808080', 'TRANSFORMADOR': '#f58231', 'CHAVE': '#3cb44b', 'REGULADOR': '#911eb4', 'RELIGADOR': '#46f0f0', 'CAPACITOR': '#ffe119', 'SUBESTAÇÃO': '#000000', 'SUBESTACAO': '#000000'}
     nome_arquivo = f_name.upper().replace('.KMZ', '').replace('.KML', '')
-    caminho_db = f"database/redes/{nome_arquivo}.pkl"
-    if os.path.exists(caminho_db): return None
     conteudo_kml = ""
     if f_name.lower().endswith('.kmz'):
         try:
@@ -212,33 +240,51 @@ def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
             for r in registros_flat:
                 r['MUNICIPIO'] = municipio
                 r['REGIONAL'] = regional
-    if registros_flat: return (caminho_db, pd.DataFrame(registros_flat))
+    if registros_flat: return pd.DataFrame(registros_flat)
     return None
 
 def processar_e_salvar_kmz_paralelo(arquivos):
     base_map = load_base_mapping()
     geo_data = get_base_geojson()
     novos_processados = 0
+    df_lote = []
+    
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for f in arquivos: futures.append(executor.submit(processar_um_kmz, f.name, f.getvalue(), base_map, geo_data))
         for future in futures:
-            resultado = future.result()
-            if resultado:
-                caminho_db, df_alimentador = resultado
-                df_alimentador.to_pickle(caminho_db)
+            df_alimentador = future.result()
+            if df_alimentador is not None and not df_alimentador.empty:
+                df_alimentador['COORDS'] = df_alimentador['COORDS'].apply(json.dumps)
+                df_lote.append(df_alimentador)
                 novos_processados += 1
+                
+    if df_lote:
+        df_final = pd.concat(df_lote, ignore_index=True)
+        conn = sqlite3.connect("database/redes.db")
+        c = conn.cursor()
+        # Deleta alimentadores existentes para não duplicar antes de inserir
+        alimentadores_inseridos = df_final['ALIMENTADOR'].unique().tolist()
+        for alim in alimentadores_inseridos:
+            c.execute("DELETE FROM malha WHERE ALIMENTADOR = ?", (alim,))
+        
+        df_final.to_sql('malha', conn, if_exists='append', index=False)
+        conn.commit()
+        conn.close()
+        
     return novos_processados
 
 @st.cache_data(show_spinner=False)
 def carregar_banco_redes():
-    dfs = []
-    arquivos = [f for f in os.listdir("database/redes") if f.endswith('.pkl')]
-    for f in arquivos:
-        try: dfs.append(pd.read_pickle(f"database/redes/{f}"))
-        except: pass
-    if dfs: return pd.concat(dfs, ignore_index=True)
-    return pd.DataFrame()
+    try:
+        conn = sqlite3.connect("database/redes.db")
+        df = pd.read_sql("SELECT * FROM malha", conn)
+        conn.close()
+        if not df.empty:
+            df['COORDS'] = df['COORDS'].apply(json.loads)
+        return df
+    except:
+        return pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
 def carregar_e_cruzar_obras():
@@ -342,7 +388,7 @@ base_map = load_base_mapping()
 geo_data_ibge = get_base_geojson()
 
 # ==========================================
-# PREPARAÇÃO DAS ÁREAS ESPECIAIS (CARREGAMENTO + BOUNDING BOX OTIMIZADO)
+# PREPARAÇÃO DAS ÁREAS ESPECIAIS (BOUNDING BOX OTIMIZADO)
 # ==========================================
 def preprocessar_bboxes_kml(geo_data):
     if not geo_data: return
@@ -389,139 +435,135 @@ def verificar_areas_da_obra(lat, lon):
     return "<br>".join(encontradas) if encontradas else "Nenhuma restrição"
 
 # ==========================================
-# 3. INTERFACE E FILTROS LATERAIS
+# 3. INTERFACE E FILTROS LATERAIS (AGORA COM EXPANDERS)
 # ==========================================
 with st.sidebar:
-    st.markdown("### 📥 1. Upload de Redes")
-    arquivos_upados = st.file_uploader("Arraste novos KMZs aqui", type=["kmz", "kml"], accept_multiple_files=True)
-    if arquivos_upados:
-        if st.button(f"💾 Processar e Salvar {len(arquivos_upados)} Arquivo(s)", type="primary", use_container_width=True):
-            qtd_total_processados, tamanho_lote = 0, 3
-            total_lotes = math.ceil(len(arquivos_upados) / tamanho_lote)
-            barra_progresso, texto_status = st.progress(0.0), st.empty()
-            for i in range(0, len(arquivos_upados), tamanho_lote):
-                lote_atual = (i // tamanho_lote) + 1
-                lote_arquivos = arquivos_upados[i:i+tamanho_lote]
-                texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes}...")
-                qtd_total_processados += processar_e_salvar_kmz_paralelo(lote_arquivos)
-                barra_progresso.progress(lote_atual / total_lotes)
-                gc.collect() 
-            if qtd_total_processados > 0:
-                st.success(f"✅ {qtd_total_processados} novos Alimentadores salvos!")
-                carregar_banco_redes.clear()
-                time.sleep(1.5)
-                st.rerun()
+    with st.expander("📥 1. Upload de Redes", expanded=False):
+        arquivos_upados = st.file_uploader("Arraste novos KMZs aqui", type=["kmz", "kml"], accept_multiple_files=True)
+        if arquivos_upados:
+            if st.button(f"💾 Processar e Salvar {len(arquivos_upados)} Arquivo(s)", type="primary", use_container_width=True):
+                qtd_total_processados, tamanho_lote = 0, 3
+                total_lotes = math.ceil(len(arquivos_upados) / tamanho_lote)
+                barra_progresso, texto_status = st.progress(0.0), st.empty()
+                for i in range(0, len(arquivos_upados), tamanho_lote):
+                    lote_atual = (i // tamanho_lote) + 1
+                    lote_arquivos = arquivos_upados[i:i+tamanho_lote]
+                    texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes}...")
+                    qtd_total_processados += processar_e_salvar_kmz_paralelo(lote_arquivos)
+                    barra_progresso.progress(lote_atual / total_lotes)
+                    gc.collect() 
+                if qtd_total_processados > 0:
+                    st.success(f"✅ {qtd_total_processados} novos Alimentadores salvos!")
+                    carregar_banco_redes.clear()
+                    time.sleep(1.5)
+                    st.rerun()
 
-    st.markdown("---")
-    st.markdown("### 🔎 2. Pesquisas Inteligentes")
-    tab_nome, tab_coord = st.tabs(["📝 Por Nome/ID", "📍 Por Coordenada"])
-    termo_pesquisa, busca_lat, busca_lon = "", None, None
-    with tab_nome: termo_pesquisa = st.text_input("Nome/Num. Poste ou Trafo:", placeholder="Ex: 554930...").strip().upper()
-    with tab_coord:
-        c_lat, c_lon = st.columns(2)
-        with c_lat: lat_input = st.text_input("Latitude:", placeholder="Ex: -5.532")
-        with c_lon: lon_input = st.text_input("Longitude:", placeholder="Ex: -47.432")
-        if lat_input and lon_input:
-            try:
-                b_lat, b_lon = float(lat_input.replace(',', '.').strip()), float(lon_input.replace(',', '.').strip())
-                if -35.0 <= b_lat <= 5.0 and -75.0 <= b_lon <= -30.0: busca_lat, busca_lon = b_lat, b_lon
-                else: st.warning("⚠️ Coordenada fora do Brasil.")
-            except: st.warning("⚠️ Formato inválido.")
+    with st.expander("🔎 2. Pesquisas Inteligentes", expanded=False):
+        tab_nome, tab_coord = st.tabs(["📝 Por Nome/ID", "📍 Por Coordenada"])
+        termo_pesquisa, busca_lat, busca_lon = "", None, None
+        with tab_nome: termo_pesquisa = st.text_input("Nome/Num. Poste ou Trafo:", placeholder="Ex: 554930...").strip().upper()
+        with tab_coord:
+            c_lat, c_lon = st.columns(2)
+            with c_lat: lat_input = st.text_input("Latitude:", placeholder="Ex: -5.532")
+            with c_lon: lon_input = st.text_input("Longitude:", placeholder="Ex: -47.432")
+            if lat_input and lon_input:
+                try:
+                    b_lat, b_lon = float(lat_input.replace(',', '.').strip()), float(lon_input.replace(',', '.').strip())
+                    if -35.0 <= b_lat <= 5.0 and -75.0 <= b_lon <= -30.0: busca_lat, busca_lon = b_lat, b_lon
+                    else: st.warning("⚠️ Coordenada fora do Brasil.")
+                except: st.warning("⚠️ Formato inválido.")
 
-    st.markdown("---")
-    st.markdown("### 🔍 3. Filtros Geográficos")
-    lista_regioes = sorted(list(set(base_map.values()))) if base_map else ["CENTRO", "LESTE", "NOROESTE", "NORTE", "SUL"]
-    regioes_sel = st.multiselect("📍 Regional:", lista_regioes)
-    
-    lista_municipios = []
-    for mun, reg in base_map.items():
-        if not regioes_sel or reg in regioes_sel: lista_municipios.append(mun)
-    municipios_sel = st.multiselect("🏙️ Município (Foco e Contorno):", sorted(lista_municipios))
-    
-    df_filt = df.copy()
-    if not df.empty:
-        if regioes_sel: df_filt = df_filt[df_filt['REGIONAL'].isin(regioes_sel)]
-        if municipios_sel: df_filt = df_filt[df_filt['MUNICIPIO'].isin(municipios_sel)]
-    
-    lista_alimentadores = sorted(df_filt['ALIMENTADOR'].unique().tolist()) if not df_filt.empty else []
-    alim_sel = st.multiselect("⚡ Alimentador:", lista_alimentadores)
-    alimentadores_visiveis = alim_sel if alim_sel else lista_alimentadores
+    with st.expander("🔍 3. Filtros Geográficos", expanded=True):
+        lista_regioes = sorted(list(set(base_map.values()))) if base_map else ["CENTRO", "LESTE", "NOROESTE", "NORTE", "SUL"]
+        regioes_sel = st.multiselect("📍 Regional:", lista_regioes)
+        
+        lista_municipios = []
+        for mun, reg in base_map.items():
+            if not regioes_sel or reg in regioes_sel: lista_municipios.append(mun)
+        municipios_sel = st.multiselect("🏙️ Município (Foco e Contorno):", sorted(lista_municipios))
+        
+        df_filt = df.copy()
+        if not df.empty:
+            if regioes_sel: df_filt = df_filt[df_filt['REGIONAL'].isin(regioes_sel)]
+            if municipios_sel: df_filt = df_filt[df_filt['MUNICIPIO'].isin(municipios_sel)]
+        
+        lista_alimentadores = sorted(df_filt['ALIMENTADOR'].unique().tolist()) if not df_filt.empty else []
+        alim_sel = st.multiselect("⚡ Alimentador:", lista_alimentadores)
+        alimentadores_visiveis = alim_sel if alim_sel else lista_alimentadores
 
     camadas_ativas = {}
     if not df.empty:
-        st.markdown("---")
-        st.markdown("### 🗂️ 4. Camadas (Desempenho)")
-        for alim in alimentadores_visiveis:
-            st.markdown(f"**{alim}**")
-            lista_camadas_alim = sorted(df[df['ALIMENTADOR'] == alim]['TIPO_REDE'].unique().tolist())
-            camadas_essenciais = ['REDE PRIMÁRIA', 'REDE PRIMARIA', 'REDE SECUNDÁRIA', 'REDE SECUNDARIA', 'TRANSFORMADOR', 'POSTE', 'CAPACITOR', 'CHAVE', 'REGULADOR', 'RELIGADOR', 'SUBESTAÇÃO', 'SUBESTACAO']
-            camadas_default = [c for c in lista_camadas_alim if c in camadas_essenciais]
-            camadas_ativas[alim] = st.multiselect("Visibilidade:", lista_camadas_alim, default=camadas_default, key=f"ms_{alim}")
+        with st.expander("🗂️ 4. Camadas (Desempenho)", expanded=False):
+            for alim in alimentadores_visiveis:
+                st.markdown(f"**{alim}**")
+                lista_camadas_alim = sorted(df[df['ALIMENTADOR'] == alim]['TIPO_REDE'].unique().tolist())
+                camadas_essenciais = ['REDE PRIMÁRIA', 'REDE PRIMARIA', 'REDE SECUNDÁRIA', 'REDE SECUNDARIA', 'TRANSFORMADOR', 'POSTE', 'CAPACITOR', 'CHAVE', 'REGULADOR', 'RELIGADOR', 'SUBESTAÇÃO', 'SUBESTACAO']
+                camadas_default = [c for c in lista_camadas_alim if c in camadas_essenciais]
+                camadas_ativas[alim] = st.multiselect("Visibilidade:", lista_camadas_alim, default=camadas_default, key=f"ms_{alim}")
             
-    st.markdown("---")
-    st.markdown("### 🗺️ 5. Áreas Especiais")
-    mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=True)
-    mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=True)
-    mostrar_arqueologia = st.checkbox("🟤 Sítios Arqueológicos", value=True)
-    mostrar_uc_federal = st.checkbox("🟡 UC Federal", value=True)
-    mostrar_uc_estadual = st.checkbox("🟡 UC Estadual", value=True)
-    mostrar_uc_municipal = st.checkbox("🟡 UC Municipal", value=True)
+    with st.expander("🗺️ 5. Áreas Especiais", expanded=False):
+        mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=True)
+        mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=True)
+        mostrar_arqueologia = st.checkbox("🟤 Sítios Arqueológicos", value=True)
+        mostrar_uc_federal = st.checkbox("🟡 UC Federal", value=True)
+        mostrar_uc_estadual = st.checkbox("🟡 UC Estadual", value=True)
+        mostrar_uc_municipal = st.checkbox("🟡 UC Municipal", value=True)
     
-    st.markdown("---")
-    st.markdown("### 🚧 6. Obras e Projetos")
-    mostrar_todas_obras = st.checkbox("📍 TODAS AS OBRAS (Clusters)", value=False)
-    mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS", value=False) 
-    mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
-    mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
-    mostrar_clima = st.checkbox("🌦️ Radar Climático (Nuvens e Chuva)", value=False)
-    mostrar_streetview = st.checkbox("🛣️ Cobertura Street View", value=False)
-    
-    msg_obras, df_concluidas, df_andamento, df_invalidas = "OK", None, None, None
-    if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras:
-        msg_obras, df_concluidas, df_andamento, df_invalidas = carregar_e_cruzar_obras()
-        if msg_obras != "OK": st.sidebar.warning(f"⚠️ {msg_obras}")
-        else:
-            if regioes_sel:
-                if df_concluidas is not None and not df_concluidas.empty: df_concluidas = df_concluidas[df_concluidas['REGIONAL_NORM'].isin(regioes_sel)]
-                if df_andamento is not None and not df_andamento.empty: df_andamento = df_andamento[df_andamento['REGIONAL_NORM'].isin(regioes_sel)]
-                if df_invalidas is not None and not df_invalidas.empty: df_invalidas = df_invalidas[df_invalidas['REGIONAL_NORM'].isin(regioes_sel)]
-            if municipios_sel:
-                if df_concluidas is not None and not df_concluidas.empty: df_concluidas = df_concluidas[df_concluidas['MUNICIPIO_NORM'].isin(municipios_sel)]
-                if df_andamento is not None and not df_andamento.empty: df_andamento = df_andamento[df_andamento['MUNICIPIO_NORM'].isin(municipios_sel)]
-                if df_invalidas is not None and not df_invalidas.empty: df_invalidas = df_invalidas[df_invalidas['MUNICIPIO_NORM'].isin(municipios_sel)]
+    with st.expander("🚧 6. Obras e Projetos", expanded=True):
+        mostrar_todas_obras = st.checkbox("📍 TODAS AS OBRAS (Clusters)", value=False)
+        mostrar_concluidas = st.checkbox("🔵 OBRAS CONCLUÍDAS", value=False) 
+        mostrar_conflitantes = st.checkbox("🚨 OBRAS CONFLITANTES (Raio 50m)", value=False)
+        mostrar_heatmap = st.checkbox("🔥 Mapa de Calor (Densidade de Obras)", value=False)
+        mostrar_clima = st.checkbox("🌦️ Radar Climático (Nuvens e Chuva)", value=False)
+        mostrar_streetview = st.checkbox("🛣️ Cobertura Street View", value=False)
+        
+        msg_obras, df_concluidas, df_andamento, df_invalidas = "OK", None, None, None
+        if mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_todas_obras:
+            msg_obras, df_concluidas, df_andamento, df_invalidas = carregar_e_cruzar_obras()
+            if msg_obras != "OK": st.sidebar.warning(f"⚠️ {msg_obras}")
+            else:
+                if regioes_sel:
+                    if df_concluidas is not None and not df_concluidas.empty: df_concluidas = df_concluidas[df_concluidas['REGIONAL_NORM'].isin(regioes_sel)]
+                    if df_andamento is not None and not df_andamento.empty: df_andamento = df_andamento[df_andamento['REGIONAL_NORM'].isin(regioes_sel)]
+                    if df_invalidas is not None and not df_invalidas.empty: df_invalidas = df_invalidas[df_invalidas['REGIONAL_NORM'].isin(regioes_sel)]
+                if municipios_sel:
+                    if df_concluidas is not None and not df_concluidas.empty: df_concluidas = df_concluidas[df_concluidas['MUNICIPIO_NORM'].isin(municipios_sel)]
+                    if df_andamento is not None and not df_andamento.empty: df_andamento = df_andamento[df_andamento['MUNICIPIO_NORM'].isin(municipios_sel)]
+                    if df_invalidas is not None and not df_invalidas.empty: df_invalidas = df_invalidas[df_invalidas['MUNICIPIO_NORM'].isin(municipios_sel)]
 
-            val_mins, val_maxs = [], []
-            if df_concluidas is not None and not df_concluidas.empty: 
-                val_mins.append(df_concluidas['DATA_DT'].min()); val_maxs.append(df_concluidas['DATA_DT'].max())
-            if df_andamento is not None and not df_andamento.empty: 
-                val_mins.append(df_andamento['DATA_DT'].min()); val_maxs.append(df_andamento['DATA_DT'].max())
-            val_mins = [d for d in val_mins if pd.notnull(d)]
-            val_maxs = [d for d in val_maxs if pd.notnull(d)]
-            
-            if val_mins and val_maxs:
-                st.markdown("<br>", unsafe_allow_html=True)
-                min_dt, max_dt = min(val_mins).date(), max(val_maxs).date()
-                if min_dt != max_dt:
-                    data_filtro = st.slider("🕒 Linha do Tempo (Data de Abertura):", min_value=min_dt, max_value=max_dt, value=(min_dt, max_dt), format="DD/MM/YY")
-                    if df_concluidas is not None and not df_concluidas.empty:
-                        mask_c = (df_concluidas['DATA_DT'].dt.date >= data_filtro[0]) & (df_concluidas['DATA_DT'].dt.date <= data_filtro[1])
-                        df_concluidas = df_concluidas[mask_c | df_concluidas['DATA_DT'].isnull()]
-                    if df_andamento is not None and not df_andamento.empty:
-                        mask_a = (df_andamento['DATA_DT'].dt.date >= data_filtro[0]) & (df_andamento['DATA_DT'].dt.date <= data_filtro[1])
-                        df_andamento = df_andamento[mask_a | df_andamento['DATA_DT'].isnull()]
+                val_mins, val_maxs = [], []
+                if df_concluidas is not None and not df_concluidas.empty: 
+                    val_mins.append(df_concluidas['DATA_DT'].min()); val_maxs.append(df_concluidas['DATA_DT'].max())
+                if df_andamento is not None and not df_andamento.empty: 
+                    val_mins.append(df_andamento['DATA_DT'].min()); val_maxs.append(df_andamento['DATA_DT'].max())
+                val_mins = [d for d in val_mins if pd.notnull(d)]
+                val_maxs = [d for d in val_maxs if pd.notnull(d)]
+                
+                if val_mins and val_maxs:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    min_dt, max_dt = min(val_mins).date(), max(val_maxs).date()
+                    if min_dt != max_dt:
+                        data_filtro = st.slider("🕒 Linha do Tempo (Data de Abertura):", min_value=min_dt, max_value=max_dt, value=(min_dt, max_dt), format="DD/MM/YY")
+                        if df_concluidas is not None and not df_concluidas.empty:
+                            mask_c = (df_concluidas['DATA_DT'].dt.date >= data_filtro[0]) & (df_concluidas['DATA_DT'].dt.date <= data_filtro[1])
+                            df_concluidas = df_concluidas[mask_c | df_concluidas['DATA_DT'].isnull()]
+                        if df_andamento is not None and not df_andamento.empty:
+                            mask_a = (df_andamento['DATA_DT'].dt.date >= data_filtro[0]) & (df_andamento['DATA_DT'].dt.date <= data_filtro[1])
+                            df_andamento = df_andamento[mask_a | df_andamento['DATA_DT'].isnull()]
 
-            qtd_conflitos = df_andamento['CONFLITO'].sum() if df_andamento is not None else 0
-            
-    st.markdown("---")
-    st.markdown("### 🗑️ Gerenciar Malha Local")
-    alim_para_deletar = st.selectbox("Apagar Alimentador do Banco:", ["Selecione..."] + sorted(df['ALIMENTADOR'].unique().tolist()) if not df.empty else ["Selecione..."])
-    if alim_para_deletar != "Selecione...":
-        if st.button("❌ Excluir Permanentemente", use_container_width=True):
-            caminho_del = f"database/redes/{alim_para_deletar}.pkl"
-            if os.path.exists(caminho_del):
-                os.remove(caminho_del)
+                qtd_conflitos = df_andamento['CONFLITO'].sum() if df_andamento is not None else 0
+                
+    with st.expander("🗑️ 7. Gerenciar Malha Local", expanded=False):
+        alim_para_deletar = st.selectbox("Apagar Alimentador do Banco:", ["Selecione..."] + sorted(df['ALIMENTADOR'].unique().tolist()) if not df.empty else ["Selecione..."])
+        if alim_para_deletar != "Selecione...":
+            if st.button("❌ Excluir Permanentemente", use_container_width=True):
+                conn = sqlite3.connect("database/redes.db")
+                c = conn.cursor()
+                c.execute("DELETE FROM malha WHERE ALIMENTADOR = ?", (alim_para_deletar,))
+                conn.commit()
+                conn.close()
                 carregar_banco_redes.clear()
-                st.success("Excluído!")
+                st.success("Excluído do Banco de Dados!")
                 time.sleep(1)
                 st.rerun()
 
@@ -554,20 +596,18 @@ with kpi_container.container():
         if not df_conf.empty:
             col_chart1, col_chart2 = st.columns(2)
             with col_chart1:
-                # Modificação 1: Adicionado o valor de contagem no topo da barra
                 df_barras = df_conf['MUNICIPIO_NORM'].value_counts().reset_index()
                 fig1 = px.bar(df_barras, x='MUNICIPIO_NORM', y='count', title="📍 Cidades com Mais Conflitos", color_discrete_sequence=['#d62728'], text='count')
                 fig1.update_traces(textposition='outside')
                 fig1.update_layout(xaxis_title="", yaxis_title="Qtd de Obras em Conflito")
                 st.plotly_chart(fig1, use_container_width=True)
             with col_chart2:
-                # Modificação 2: Quantidade numérica correspondente direcionada na fatia
                 fig2 = px.pie(df_conf, names='STATUS LIST', title="📊 Status das Obras Sobrepostas", hole=0.4, color_discrete_sequence=['#ff7f0e', '#ffbb78', '#d62728'])
                 fig2.update_traces(textposition='outside', textinfo='value+percent')
                 st.plotly_chart(fig2, use_container_width=True)
 
 # ==========================================
-# 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE)
+# 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE E DARK MODE)
 # ==========================================
 mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canvas=True)
 
@@ -604,8 +644,10 @@ js_draw_loc = """
 """
 mapa.get_root().html.add_child(folium.Element(js_draw_loc))
 
+# Camadas base claras e escuras
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
+folium.TileLayer(tiles='CartoDB dark_matter', name='Mapa Base (Escuro - Foco em Redes)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 
 if geo_data_ibge:
     def style_function(feature):
@@ -659,6 +701,21 @@ if not df.empty:
     for alim in alimentadores_visiveis:
         if alim in camadas_ativas: mask_camadas = mask_camadas | ((df_mapa['ALIMENTADOR'] == alim) & (df_mapa['TIPO_REDE'].isin(camadas_ativas[alim])))
     df_mapa = df_mapa[mask_camadas]
+
+    # Prepara a Árvore Matemática para calcular a Rede Elétrica mais próxima das Obras
+    grid_pts, grid_info = [], []
+    if not df_mapa.empty:
+        for idx, row in df_mapa.iterrows():
+            if row['TIPO_GEOMETRIA'] == 'Ponto':
+                pt_lat, pt_lon = row['COORDS'][0], row['COORDS'][1]
+                grid_pts.append(latlon_to_xyz(pt_lat, pt_lon))
+                grid_info.append((row['TIPO_REDE'], row['NOME'], pt_lat, pt_lon))
+            else:
+                for pt in row['COORDS']:
+                    pt_lat, pt_lon = pt[0], pt[1]
+                    grid_pts.append(latlon_to_xyz(pt_lat, pt_lon))
+                    grid_info.append((row['TIPO_REDE'], row['NOME'], pt_lat, pt_lon))
+    tree_grid = cKDTree(grid_pts) if grid_pts else None
 
     df_busca = pd.DataFrame()
     nearest_idx = None
@@ -749,6 +806,17 @@ if not df.empty:
     if busca_lat is not None and busca_lon is not None: folium.Marker(location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'), tooltip="Sua Pesquisa GPS").add_to(fg_busca)
     fg_busca.add_to(mapa)
 
+else:
+    tree_grid = None # Evita erros se a malha ainda não foi carregada no filtro
+
+def calcular_rede_proxima(lat, lon):
+    if not tree_grid: return "<span style='color:gray'>Ative um alimentador no filtro para calcular</span>"
+    xyz = latlon_to_xyz(lat, lon)
+    _, idx = tree_grid.query(xyz)
+    tipo, nome, g_lat, g_lon = grid_info[idx]
+    dist_m = haversine(lat, lon, g_lat, g_lon) * 1000
+    return f"<b>{tipo}</b> {nome} ({dist_m:.1f}m)"
+
 # ==========================================
 # RENDERIZAÇÃO DAS ÁREAS ESPECIAIS (COM POPUPS)
 # ==========================================
@@ -794,8 +862,9 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
                 sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
                 areas_especiais = verificar_areas_da_obra(lat, lon) 
+                rede_prox = calcular_rede_proxima(lat, lon)
                 
-                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: #1f77b4; border-bottom: 2px solid #1f77b4; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>REDE ELÉTRICA:</b></td><td>{rede_prox}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
                 
                 folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor='#1f77b4', fillOpacity=0.9, tooltip=f"Concluída: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=350)).add_to(cluster_todas)
         
@@ -806,8 +875,9 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
                 titulo = "🚨 CONFLITO!" if row['CONFLITO'] else "🚧 EM ANDAMENTO"
                 sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
                 areas_especiais = verificar_areas_da_obra(lat, lon) 
+                rede_prox = calcular_rede_proxima(lat, lon)
                 
-                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+                html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor}; border-bottom: 2px solid {cor}; padding-bottom: 5px;">{titulo}</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(str(row.get('PROTOCOLO', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>REDE ELÉTRICA:</b></td><td>{rede_prox}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
                 
                 folium.CircleMarker(location=[lat, lon], radius=5, color='black', weight=1, fill=True, fillColor=cor, fillOpacity=0.9, tooltip=f"{titulo}: {html.escape(str(row.get('PROTOCOLO', 'S/N')))}", popup=folium.Popup(html_popup, max_width=350)).add_to(cluster_todas)
         cluster_todas.add_to(mapa)
@@ -820,8 +890,9 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             cor_concluida = '#1f77b4'
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
             areas_especiais = verificar_areas_da_obra(lat, lon)
+            rede_prox = calcular_rede_proxima(lat, lon)
             
-            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: {cor_concluida}; border-bottom: 2px solid {cor_concluida}; padding-bottom: 5px;">✅ OBRA CONCLUÍDA</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO:</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME:</b></td><td>{html.escape(str(row.get('NOME', 'S/N')))}</td></tr><tr><td style="color: #555; padding: 2px;"><b>REDE ELÉTRICA:</b></td><td>{rede_prox}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
             
             folium.CircleMarker(
                 location=[lat, lon], radius=6, color='black', weight=1, fill=True, 
@@ -841,6 +912,7 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
             nome_alvo = str(row.get('NOME_CONCLUIDA', 'S/N'))
             sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
             areas_especiais = verificar_areas_da_obra(lat, lon)
+            rede_prox = calcular_rede_proxima(lat, lon)
             
             dados_tabela_conflito.append({
                 "Protocolo (Nova)": protocolo, "Nome (Nova)": nome_nova,
@@ -850,7 +922,7 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
                 "Street View": sv_url
             })
                 
-            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: red; border-bottom: 2px solid red; padding-bottom: 5px;">🚨 CONFLITO DETECTADO</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr><tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr><tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
+            html_popup = f"""<div style="min-width: 250px; font-family: sans-serif;"><h4 style="margin-top: 0; color: red; border-bottom: 2px solid red; padding-bottom: 5px;">🚨 CONFLITO DETECTADO</h4><table style="width:100%;"><tr><td style="color: #555; padding: 2px;"><b>PROTOCOLO (NOVA):</b></td><td>{html.escape(protocolo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>NOME (NOVA):</b></td><td>{html.escape(nome_nova)}</td></tr><tr><td style='color: red; padding: 2px;'><b>CONFLITO COM:</b></td><td style='color: red;'>{html.escape(row['PROTOCOLO_CONFLITO'])} ({row['DISTANCIA_CONFLITO']:.1f}m)</td></tr><tr><td style='color: red; padding: 2px;'><b>NOME (CONCLUÍDA):</b></td><td style='color: red;'>{html.escape(nome_alvo)}</td></tr><tr><td style="color: #555; padding: 2px;"><b>REDE ELÉTRICA:</b></td><td>{rede_prox}</td></tr><tr><td style="color: #555; padding: 2px;"><b>ÁREAS:</b></td><td>{areas_especiais}</td></tr><tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr></table></div>"""
             folium.CircleMarker(location=[lat, lon], radius=6, color='black', weight=1, fill=True, fillColor='red', fillOpacity=0.9, tooltip=f"Conflito: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=350)).add_to(fg_andamento)
         fg_andamento.add_to(mapa)
 
@@ -877,26 +949,6 @@ if mostrar_clima:
         st.sidebar.warning("⚠️ Serviço de radar climático temporariamente indisponível na API central.")
 
 folium.LayerControl(position='topright').add_to(mapa)
-
-if len(dados_tabela_conflito) > 0 and not df.empty:
-    df_malha_filtro = df.copy()
-    if alimentadores_visiveis: df_malha_filtro = df_malha_filtro[df_malha_filtro['ALIMENTADOR'].isin(alimentadores_visiveis)]
-    if not df_malha_filtro.empty:
-        grid_pts, grid_info = [], []
-        for idx, row in df_malha_filtro.iterrows():
-            if row['TIPO_GEOMETRIA'] == 'Ponto':
-                grid_pts.append(latlon_to_xyz(row['COORDS'][0], row['COORDS'][1]))
-                grid_info.append(f"{row['TIPO_REDE']} ({row['NOME']})")
-            else:
-                for pt in row['COORDS']:
-                    grid_pts.append(latlon_to_xyz(pt[0], pt[1]))
-                    grid_info.append(f"{row['TIPO_REDE']} ({row['NOME']})")
-        if grid_pts:
-            tree_grid = cKDTree(grid_pts)
-            for conflito in dados_tabela_conflito:
-                xyz = latlon_to_xyz(conflito['Latitude'], conflito['Longitude'])
-                _, idx_prox = tree_grid.query(xyz)
-                conflito['Rede Próxima'] = grid_info[idx_prox]
 
 # -------------------------------------------------------------
 # 5. TABELA INTELIGENTE E BOTÃO DE EXPORTAÇÃO
