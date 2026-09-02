@@ -413,12 +413,13 @@ with st.sidebar:
             
     st.markdown("---")
     st.markdown("### 🗺️ 5. Áreas Especiais")
-    mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=False)
-    mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=False)
-    mostrar_arqueologia = st.checkbox("🔵 Sítios Arqueológicos", value=False)
-    mostrar_uc_federal = st.checkbox("🟡 UC Federal", value=False)
-    mostrar_uc_estadual = st.checkbox("🟡 UC Estadual", value=False)
-    mostrar_uc_municipal = st.checkbox("🟡 UC Municipal", value=False)
+    # ✅ CORREÇÃO: Checkboxes ativados por padrão (value=True) para carregar automaticamente no mapa
+    mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=True)
+    mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=True)
+    mostrar_arqueologia = st.checkbox("🔵 Sítios Arqueológicos", value=True)
+    mostrar_uc_federal = st.checkbox("🟡 UC Federal", value=True)
+    mostrar_uc_estadual = st.checkbox("🟡 UC Estadual", value=True)
+    mostrar_uc_municipal = st.checkbox("🟡 UC Municipal", value=True)
     
     st.markdown("---")
     st.markdown("### 🚧 6. Obras e Projetos")
@@ -721,25 +722,31 @@ if not df.empty:
     if busca_lat is not None and busca_lon is not None: folium.Marker(location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'), tooltip="Sua Pesquisa GPS").add_to(fg_busca)
     fg_busca.add_to(mapa)
 
+# ✅ CORREÇÃO: Apontando os KMLs para a pasta exata (kmls/) e nomes exatos dos arquivos do GitHub
 if mostrar_quilombos:
-    geo_q = get_kml_cached("assets/quilombos.kml", "#ff7f00")
+    geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00")
     if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 if mostrar_indigenas:
-    geo_i = get_kml_cached("assets/indigenas.kml", "#2ca02c")
+    geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c")
     if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 if mostrar_arqueologia:
-    geo_a = get_kml_cached("assets/arqueologia.kml", "#1f77b4")
+    geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#1f77b4")
     if geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4")).add_to(mapa)
 
 if mostrar_uc_federal:
-    geo_uc_fed = get_kml_cached("assets/uc_federal.kml", "#e6b800")
+    geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800")
     if geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 if mostrar_uc_estadual:
-    geo_uc_est = get_kml_cached("assets/uc_estadual.kml", "#ffff00")
+    geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00")
     if geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
+
+# ✅ CORREÇÃO: Adicionado o bloco para mostrar a UC Municipal que estava faltando
+if mostrar_uc_municipal:
+    geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00")
+    if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}).add_to(mapa)
 
 
 # ==========================================
