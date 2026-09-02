@@ -321,6 +321,17 @@ def carregar_e_cruzar_obras():
         df_obras['LON_CLEAN'] = pd.to_numeric(df_obras[lon_col], errors='coerce')
         df_obras = df_obras.dropna(subset=['LAT_CLEAN', 'LON_CLEAN'])
         
+        # Filtro de Coordenadas Válidas (Elimina 0,0 ou fora do BR)
+        mask_valid_coords = (
+            (df_obras['LAT_CLEAN'] != 0.0) & 
+            (df_obras['LON_CLEAN'] != 0.0) & 
+            (df_obras['LAT_CLEAN'] >= -35.0) & 
+            (df_obras['LAT_CLEAN'] <= 5.0) & 
+            (df_obras['LON_CLEAN'] >= -75.0) & 
+            (df_obras['LON_CLEAN'] <= -30.0)
+        )
+        df_obras = df_obras[mask_valid_coords]
+        
         # 1. Filtra Obras Concluídas (Raio)
         mask_concluida = df_obras[status_sisco_col].astype(str).str.contains('CONCLU', case=False, na=False)
         df_concluidas = df_obras[mask_concluida].copy()
@@ -394,7 +405,7 @@ with st.sidebar:
     if arquivos_upados:
         if st.button(f"💾 Processar e Salvar {len(arquivos_upados)} Arquivo(s)", type="primary", use_container_width=True):
             qtd_total_processados = 0
-            tamanho_lote = 3 # Lote reduzido para não estourar a memória
+            tamanho_lote = 3
             total_lotes = math.ceil(len(arquivos_upados) / tamanho_lote)
             
             barra_progresso = st.progress(0.0)
@@ -724,27 +735,27 @@ if not df.empty:
 # CAMADAS DE KML E OBRAS (ÁREAS ESPECIAIS)
 # ==========================================
 if mostrar_quilombos:
-    geo_q = get_kml_cached("assets/quilombos.kml", "#ff7f00") # Laranja
+    geo_q = get_kml_cached("assets/quilombos.kml", "#ff7f00")
     if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Quilombo:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_indigenas:
-    geo_i = get_kml_cached("assets/indigenas.kml", "#2ca02c") # Verde
+    geo_i = get_kml_cached("assets/indigenas.kml", "#2ca02c")
     if geo_i: folium.GeoJson(geo_i, name="Terras Indígenas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Terra Indígena:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_arqueologia:
-    geo_a = get_kml_cached("assets/arqueologia.kml", "#1f77b4") # Azul
+    geo_a = get_kml_cached("assets/arqueologia.kml", "#1f77b4")
     if geo_a: folium.GeoJson(geo_a, name="Sítios Arqueológicos", marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color="#1f77b4"), tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Sítio:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_uc_federal:
-    geo_uc_fed = get_kml_cached("assets/uc_federal.kml", "#e6b800") # Amarelo Escuro
+    geo_uc_fed = get_kml_cached("assets/uc_federal.kml", "#e6b800")
     if geo_uc_fed: folium.GeoJson(geo_uc_fed, name="UC Federal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Federal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_uc_estadual:
-    geo_uc_est = get_kml_cached("assets/uc_estadual.kml", "#ffff00") # Amarelo Padrão
+    geo_uc_est = get_kml_cached("assets/uc_estadual.kml", "#ffff00")
     if geo_uc_est: folium.GeoJson(geo_uc_est, name="UC Estadual", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Estadual:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 if mostrar_uc_municipal:
-    geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70") # Amarelo Claro
+    geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70")
     if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
 # Nova camada: Inteligência de Cruzamento de Obras com CLUSTER
@@ -752,7 +763,7 @@ dados_tabela_conflito = []
 
 if mostrar_obras and msg_obras == "OK":
     
-    # 1. Pinta Obras Concluídas (Centro Preto e Raio Verde) DIRETAMENTE NO MAPA para manter o raio visível
+    # 1. Pinta Obras Concluídas (Centro Preto e Raio Verde)
     if df_concluidas is not None:
         fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Raios)", show=True)
         for _, row in df_concluidas.iterrows():
@@ -774,7 +785,7 @@ if mostrar_obras and msg_obras == "OK":
             folium.Circle(location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
             
-    # 2. Pinta Obras em Andamento DENTRO DE UM CLUSTER (Otimização Extrema de Performance)
+    # 2. Pinta Obras em Andamento DENTRO DE UM CLUSTER
     if df_andamento is not None:
         cluster_andamento = MarkerCluster(name="Obras em Andamento (Cluster)")
         
@@ -821,7 +832,6 @@ if mostrar_obras and msg_obras == "OK":
 
 folium.LayerControl(position='topright').add_to(mapa)
 
-# Renderiza o mapa optimizado
 st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
 
 # ==========================================
