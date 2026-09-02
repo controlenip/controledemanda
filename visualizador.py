@@ -321,7 +321,6 @@ def carregar_e_cruzar_obras():
         df_obras['LON_CLEAN'] = pd.to_numeric(df_obras[lon_col], errors='coerce')
         df_obras = df_obras.dropna(subset=['LAT_CLEAN', 'LON_CLEAN'])
         
-        # Filtro de Coordenadas Válidas (Elimina 0,0 ou fora do BR)
         mask_valid_coords = (
             (df_obras['LAT_CLEAN'] != 0.0) & 
             (df_obras['LON_CLEAN'] != 0.0) & 
@@ -332,11 +331,9 @@ def carregar_e_cruzar_obras():
         )
         df_obras = df_obras[mask_valid_coords]
         
-        # 1. Filtra Obras Concluídas (Raio)
         mask_concluida = df_obras[status_sisco_col].astype(str).str.contains('CONCLU', case=False, na=False)
         df_concluidas = df_obras[mask_concluida].copy()
         
-        # 2. Filtra Obras em Andamento / Levantamento
         def normalizar(x): return remove_accents(str(x)).upper().strip()
         df_obras['STATUS_LIST_NORM'] = df_obras[status_list_col].apply(normalizar)
         
@@ -344,14 +341,13 @@ def carregar_e_cruzar_obras():
         mask_andamento = df_obras['STATUS_LIST_NORM'].isin(status_alvos)
         df_andamento = df_obras[mask_andamento & (~mask_concluida)].copy()
         
-        # 3. Cruzamento Espacial
         df_andamento['CONFLITO'] = False
         df_andamento['PROTOCOLO_CONFLITO'] = ""
         df_andamento['DISTANCIA_CONFLITO'] = 0.0
         
         if not df_concluidas.empty and not df_andamento.empty:
             def latlon_to_xyz(lat, lon):
-                R = 6371000.0 # Metros
+                R = 6371000.0
                 lat_rad, lon_rad = math.radians(lat), math.radians(lon)
                 return R * math.cos(lat_rad) * math.cos(lon_rad), R * math.cos(lat_rad) * math.sin(lon_rad), R * math.sin(lat_rad)
             
@@ -393,6 +389,13 @@ def carregar_e_cruzar_obras():
 # ==========================================
 st.markdown("<h2 style='color: #0D256C;'>🗺️ Visualizador Oficial de Malha (Satélite Integrado)</h2>", unsafe_allow_html=True)
 st.markdown("O sistema usa **Inteligência Espacial** para descobrir o município e Scipy para pesquisa instantânea de coordenadas!")
+
+# -------------------------------------------------------------
+# RESERVANDO ESPAÇOS: MAPA EM CIMA, TABELA EMBAIXO
+# A tabela será processada antes para atualizar o zoom do mapa
+# -------------------------------------------------------------
+map_container = st.empty()
+table_container = st.container()
 
 df = carregar_banco_redes()
 base_map = load_base_mapping()
@@ -530,7 +533,7 @@ with st.sidebar:
                 st.rerun()
 
 # ==========================================
-# 3. CONSTRUÇÃO DO MAPA FOLIUM
+# 3. CONSTRUÇÃO DO MAPA FOLIUM (BASE)
 # ==========================================
 mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canvas=True)
 
@@ -600,6 +603,9 @@ if geo_data_ibge:
     """
     mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
 
+todas_lats, todas_lons = [], []
+busca_lats, busca_lons = [], []
+
 if not df.empty:
     df_mapa = df.copy()
     if regioes_sel: df_mapa = df_mapa[df_mapa['REGIONAL'].isin(regioes_sel)]
@@ -613,7 +619,6 @@ if not df.empty:
 
     df_busca = pd.DataFrame()
     nearest_idx = None
-    todas_lats, todas_lons = [], []
 
     if busca_lat is not None and busca_lon is not None and not df_mapa.empty:
         def latlon_to_xyz(lat, lon):
@@ -687,7 +692,6 @@ if not df.empty:
             popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'MUNICIPIO', 'GPS'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'], style="font-family: sans-serif; font-size: 13px; min-width: 250px;")
         ).add_to(mapa)
 
-    busca_lats, busca_lons = [], []
     fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
     for _, row in df_busca.iterrows():
         coord_txt = f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}" if row['TIPO_GEOMETRIA'] == 'Ponto' else "Linha de Múltiplos Pontos"
@@ -715,25 +719,6 @@ if not df.empty:
 
     fg_busca.add_to(mapa)
 
-    if busca_lat is not None and busca_lon is not None: mapa.fit_bounds([[busca_lat - 0.001, busca_lon - 0.001], [busca_lat + 0.001, busca_lon + 0.001]])
-    elif busca_lats and busca_lons: mapa.fit_bounds([[min(busca_lats), min(busca_lons)], [max(busca_lats), max(busca_lons)]])
-    elif municipios_sel and geo_data_ibge:
-        mun_foco_lats, mun_foco_lons = [], []
-        for feature in geo_data_ibge['features']:
-            if feature['properties'].get('MUNICIPIO') in municipios_sel:
-                geom = feature['geometry']
-                if geom['type'] == 'Polygon':
-                    for pt in geom['coordinates'][0]: mun_foco_lats.append(pt[1]); mun_foco_lons.append(pt[0])
-                elif geom['type'] == 'MultiPolygon':
-                    for poly in geom['coordinates']:
-                        for pt in poly[0]: mun_foco_lats.append(pt[1]); mun_foco_lons.append(pt[0])
-        if mun_foco_lats and mun_foco_lons: mapa.fit_bounds([[min(mun_foco_lats), min(mun_foco_lons)], [max(mun_foco_lats), max(mun_foco_lons)]])
-        elif todas_lats and todas_lons: mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
-    elif todas_lats and todas_lons: mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
-
-# ==========================================
-# CAMADAS DE KML E OBRAS (ÁREAS ESPECIAIS)
-# ==========================================
 if mostrar_quilombos:
     geo_q = get_kml_cached("assets/quilombos.kml", "#ff7f00")
     if geo_q: folium.GeoJson(geo_q, name="Áreas Quilombolas", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Quilombo:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
@@ -758,12 +743,11 @@ if mostrar_uc_municipal:
     geo_uc_mun = get_kml_cached("assets/uc_municipal.kml", "#ffea70")
     if geo_uc_mun: folium.GeoJson(geo_uc_mun, name="UC Municipal", style_function=lambda x: {'fillColor': x['properties']['COR'], 'color': x['properties']['COR'], 'weight': 2, 'fillOpacity': 0.4}, tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['UC Municipal:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(mapa)
 
-# Nova camada: Inteligência de Cruzamento de Obras com CLUSTER
+
+# Obras com CLUSTER
 dados_tabela_conflito = []
 
 if mostrar_obras and msg_obras == "OK":
-    
-    # 1. Pinta Obras Concluídas (Centro Preto e Raio Verde)
     if df_concluidas is not None:
         fg_concluidas = folium.FeatureGroup(name="Obras Concluídas (Raios)", show=True)
         for _, row in df_concluidas.iterrows():
@@ -785,7 +769,6 @@ if mostrar_obras and msg_obras == "OK":
             folium.Circle(location=[lat, lon], radius=100, color='#2ca02c', weight=2, fill=True, fillColor='#2ca02c', fillOpacity=0.35, tooltip=f"Obra Concluída: {html.escape(protocolo)}", popup=folium.Popup(html_popup, max_width=300)).add_to(fg_concluidas)
         fg_concluidas.add_to(mapa)
             
-    # 2. Pinta Obras em Andamento DENTRO DE UM CLUSTER
     if df_andamento is not None:
         cluster_andamento = MarkerCluster(name="Obras em Andamento (Cluster)")
         
@@ -808,7 +791,7 @@ if mostrar_obras and msg_obras == "OK":
                     "Longitude": lon
                 })
             else:
-                cor_ponto = '#1f77b4' # Azul
+                cor_ponto = '#1f77b4' 
                 titulo = "Obra em Andamento"
                 info_extra = ""
                 
@@ -832,15 +815,64 @@ if mostrar_obras and msg_obras == "OK":
 
 folium.LayerControl(position='topright').add_to(mapa)
 
-st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
+# -------------------------------------------------------------
+# 4. CAPTURANDO CLIQUE NA TABELA (RODA ANTES DE DESENHAR O MAPA)
+# -------------------------------------------------------------
+zoom_lat, zoom_lon = None, None
 
-# ==========================================
-# 4. TABELA DE EXPORTAÇÃO (CONFLITOS)
-# ==========================================
-if mostrar_obras and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
-    st.markdown("---")
-    st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
-    st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 100 metros** de uma obra já dada como concluída no SISCO.")
-    
-    df_tabela = pd.DataFrame(dados_tabela_conflito)
-    st.dataframe(df_tabela, use_container_width=True)
+with table_container:
+    if mostrar_obras and msg_obras == "OK" and len(dados_tabela_conflito) > 0:
+        st.markdown("---")
+        st.markdown(f"<h3 style='color: #d62728;'>🚨 Relatório de Obras Sobrepostas (Total: {len(dados_tabela_conflito)})</h3>", unsafe_allow_html=True)
+        st.markdown("As obras abaixo estão em andamento ou correção, mas a coordenada registrada encontra-se dentro do **raio de 100 metros** de uma obra já dada como concluída no SISCO.<br>💡 **DICA INTERATIVA:** Clique em qualquer linha da tabela abaixo para que o mapa foque e dê zoom exato na obra!", unsafe_allow_html=True)
+        
+        df_tabela = pd.DataFrame(dados_tabela_conflito)
+        
+        try:
+            event = st.dataframe(
+                df_tabela, 
+                use_container_width=True, 
+                on_select="rerun", 
+                selection_mode="single_row"
+            )
+            if hasattr(event, 'selection') and event.selection.rows:
+                idx = event.selection.rows[0]
+                zoom_lat = float(df_tabela.iloc[idx]['Latitude'])
+                zoom_lon = float(df_tabela.iloc[idx]['Longitude'])
+        except Exception:
+            # Caso a versão do Streamlit seja muito antiga
+            st.dataframe(df_tabela, use_container_width=True)
+            escolha = st.selectbox("📌 O seu sistema Streamlit está desatualizado. Use esta caixa para selecionar a obra e dar zoom:", ["Nenhum"] + df_tabela['Protocolo (Nova)'].astype(str).tolist())
+            if escolha != "Nenhum":
+                linha = df_tabela[df_tabela['Protocolo (Nova)'].astype(str) == escolha].iloc[0]
+                zoom_lat = float(linha['Latitude'])
+                zoom_lon = float(linha['Longitude'])
+
+# -------------------------------------------------------------
+# 5. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL
+# -------------------------------------------------------------
+# Zoom prioritário (Se clicar na tabela, a caixa visual engloba exatos 220 metros ao redor do ponto)
+if zoom_lat is not None and zoom_lon is not None:
+    mapa.fit_bounds([[zoom_lat - 0.001, zoom_lon - 0.001], [zoom_lat + 0.001, zoom_lon + 0.001]])
+elif busca_lat is not None and busca_lon is not None:
+    mapa.fit_bounds([[busca_lat - 0.001, busca_lon - 0.001], [busca_lat + 0.001, busca_lon + 0.001]])
+elif busca_lats and busca_lons: 
+    mapa.fit_bounds([[min(busca_lats), min(busca_lons)], [max(busca_lats), max(busca_lons)]])
+elif municipios_sel and geo_data_ibge:
+    mun_foco_lats, mun_foco_lons = [], []
+    for feature in geo_data_ibge['features']:
+        if feature['properties'].get('MUNICIPIO') in municipios_sel:
+            geom = feature['geometry']
+            if geom['type'] == 'Polygon':
+                for pt in geom['coordinates'][0]: mun_foco_lats.append(pt[1]); mun_foco_lons.append(pt[0])
+            elif geom['type'] == 'MultiPolygon':
+                for poly in geom['coordinates']:
+                    for pt in poly[0]: mun_foco_lats.append(pt[1]); mun_foco_lons.append(pt[0])
+    if mun_foco_lats and mun_foco_lons: mapa.fit_bounds([[min(mun_foco_lats), min(mun_foco_lons)], [max(mun_foco_lats), max(mun_foco_lons)]])
+    elif todas_lats and todas_lons: mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
+elif todas_lats and todas_lons: 
+    mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
+
+# Finalmente manda o mapa pronto para o espaço de cima
+with map_container:
+    st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
