@@ -167,6 +167,83 @@ def get_kml_cached(path, color):
 TIPOS_PADRAO_VISIVEIS = {"POSTE", "TRANSFORMADOR", "REDE PRIMARIA", "REDE SECUNDARIA"}
 ZOOM_MINIMO_REDE = 10
 
+# O mapa base sempre abre imediatamente. A malha pesada só é montada no servidor
+# depois que o usuário aproxima o mapa. Assim os milhares de postes/linhas não
+# entram no HTML inicial do Folium.
+MAPA_CENTRO_INICIAL = (-5.2, -45.0)
+
+if "_mapa_zoom" not in st.session_state:
+    st.session_state["_mapa_zoom"] = 6.0
+if "_mapa_center" not in st.session_state:
+    st.session_state["_mapa_center"] = {"lat": MAPA_CENTRO_INICIAL[0], "lng": MAPA_CENTRO_INICIAL[1]}
+if "_mapa_bounds" not in st.session_state:
+    st.session_state["_mapa_bounds"] = None
+
+def _extrair_bbox_leaflet(bounds):
+    """Aceita os formatos de bounds retornados pelo streamlit-folium."""
+    if not isinstance(bounds, dict):
+        return None
+    sw = bounds.get("_southWest") or bounds.get("southWest") or bounds.get("southwest")
+    ne = bounds.get("_northEast") or bounds.get("northEast") or bounds.get("northeast")
+    if not isinstance(sw, dict) or not isinstance(ne, dict):
+        return None
+    try:
+        sul = float(sw["lat"]); oeste = float(sw["lng"])
+        norte = float(ne["lat"]); leste = float(ne["lng"])
+        return sul, oeste, norte, leste
+    except (KeyError, TypeError, ValueError):
+        return None
+
+def _bbox_aproximado_por_zoom(center, zoom):
+    """Fallback leve quando o componente ainda não devolveu bounds."""
+    try:
+        lat = float(center.get("lat", MAPA_CENTRO_INICIAL[0]))
+        lon = float(center.get("lng", MAPA_CENTRO_INICIAL[1]))
+        z = max(1.0, float(zoom))
+    except Exception:
+        lat, lon, z = MAPA_CENTRO_INICIAL[0], MAPA_CENTRO_INICIAL[1], 6.0
+    # Aproxima a área visível de uma tela desktop e acrescenta margem.
+    span_lon = max(0.03, (360.0 / (2 ** z)) * 5.5)
+    span_lat = max(0.03, span_lon * 0.62)
+    return lat - span_lat, lon - span_lon, lat + span_lat, lon + span_lon
+
+def _expandir_bbox(bbox, fator=0.18):
+    sul, oeste, norte, leste = bbox
+    dlat = max(0.001, norte - sul) * fator
+    dlon = max(0.001, leste - oeste) * fator
+    return sul - dlat, oeste - dlon, norte + dlat, leste + dlon
+
+def _geometria_intersecta_bbox(row, bbox):
+    sul, oeste, norte, leste = bbox
+    coords = row.get('COORDS')
+    if not coords:
+        return False
+    try:
+        if row.get('TIPO_GEOMETRIA') == 'Ponto':
+            lat, lon = float(coords[0]), float(coords[1])
+            return sul <= lat <= norte and oeste <= lon <= leste
+        lats = [float(p[0]) for p in coords]
+        lons = [float(p[1]) for p in coords]
+        return not (max(lats) < sul or min(lats) > norte or max(lons) < oeste or min(lons) > leste)
+    except Exception:
+        return False
+
+def _tipos_renderizaveis_no_zoom(zoom):
+    """Renderização progressiva: linhas primeiro, depois trafos e postes."""
+    z = float(zoom)
+    tipos = set()
+    if z >= ZOOM_MINIMO_REDE:
+        tipos.update({"REDE PRIMARIA", "REDE SECUNDARIA"})
+    if z >= ZOOM_MINIMO_REDE + 1:
+        tipos.add("TRANSFORMADOR")
+    if z >= ZOOM_MINIMO_REDE + 2:
+        tipos.add("POSTE")
+    # Demais divisões do KMZ entram somente em zoom mais próximo e continuam
+    # desmarcadas por padrão no controle de camadas.
+    if z >= ZOOM_MINIMO_REDE + 1:
+        tipos.update({"CHAVE", "REGULADOR", "RELIGADOR", "CAPACITOR", "SUBESTACAO"})
+    return tipos
+
 CORES_REDE = {
     "REDE PRIMARIA": "#0066FF",      # azul
     "REDE SECUNDARIA": "#FF00FF",    # magenta
@@ -486,17 +563,11 @@ def preprocessar_bboxes_kml(geo_data):
                 bboxes.append((min(lons), max(lons), min(lats), max(lats)))
             feat['bboxes'] = bboxes
 
-geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00"); preprocessar_bboxes_kml(geo_q)
-geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c"); preprocessar_bboxes_kml(geo_i)
-geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b"); preprocessar_bboxes_kml(geo_a)
-geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800"); preprocessar_bboxes_kml(geo_uc_fed)
-geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_est)
-geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_mun)
-
-dict_areas_especiais = {
-    "Quilombo": geo_q, "Terra Indígena": geo_i, "Sítio Arqueológico": geo_a,
-    "UC Federal": geo_uc_fed, "UC Estadual": geo_uc_est, "UC Municipal": geo_uc_mun
-}
+# As áreas especiais são pesadas. Não lemos os seis KMLs no arranque do app.
+# Cada arquivo só é aberto quando sua caixa for marcada na barra lateral.
+geo_q = geo_i = geo_a = None
+geo_uc_fed = geo_uc_est = geo_uc_mun = None
+dict_areas_especiais = {}
 
 def verificar_areas_da_obra(lat, lon):
     encontradas = []
@@ -623,19 +694,37 @@ with st.sidebar:
             st.markdown(
                 f"As divisões dos KMZ ficam disponíveis no **controle de camadas do próprio mapa**. "
                 f"Por padrão ficam ativas somente **Poste, Transformador, Rede Primária e Rede Secundária**. "
-                f"Para manter o mapa limpo, as redes detalhadas só aparecem a partir do **zoom {ZOOM_MINIMO_REDE}**."
+                f"O **mapa base abre primeiro**. A malha é carregada por área visível: redes no zoom {ZOOM_MINIMO_REDE}, transformadores no {ZOOM_MINIMO_REDE + 1} e postes no {ZOOM_MINIMO_REDE + 2}."
             )
-            for alim in alimentadores_visiveis:
-                lista_camadas_alim = sorted(df[df['ALIMENTADOR'] == alim]['TIPO_REDE'].dropna().unique().tolist())
-                camadas_ativas[alim] = lista_camadas_alim
+            tipos_kmz_disponiveis = sorted(df_filt['TIPO_REDE'].dropna().unique().tolist()) if not df_filt.empty else []
+            if tipos_kmz_disponiveis:
+                st.caption("Divisões encontradas: " + ", ".join(tipos_kmz_disponiveis))
+            # Mesma lista de tipos para todos os alimentadores; evita varrer o DataFrame
+            # inteiro uma vez para cada KMZ durante a abertura do aplicativo.
+            camadas_ativas = {alim: tipos_kmz_disponiveis for alim in alimentadores_visiveis}
 
     with st.expander("🗺️ 5. Áreas Especiais", expanded=False):
-        mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=True)
-        mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=True)
-        mostrar_arqueologia = st.checkbox("🟤 Sítios Arqueológicos", value=True)
-        mostrar_uc_federal = st.checkbox("🟡 UC Federal", value=True)
-        mostrar_uc_estadual = st.checkbox("🟡 UC Estadual", value=True)
-        mostrar_uc_municipal = st.checkbox("🟡 UC Municipal", value=True)
+        mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=False)
+        mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=False)
+        mostrar_arqueologia = st.checkbox("🟤 Sítios Arqueológicos", value=False)
+        mostrar_uc_federal = st.checkbox("🟡 UC Federal", value=False)
+        mostrar_uc_estadual = st.checkbox("🟡 UC Estadual", value=False)
+        mostrar_uc_municipal = st.checkbox("🟡 UC Municipal", value=False)
+
+    # Carregamento sob demanda das áreas especiais. Isso deixa a primeira abertura
+    # do mapa independente do tamanho desses KMLs.
+    geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00") if mostrar_quilombos else None
+    geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c") if mostrar_indigenas else None
+    geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b") if mostrar_arqueologia else None
+    geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800") if mostrar_uc_federal else None
+    geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00") if mostrar_uc_estadual else None
+    geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00") if mostrar_uc_municipal else None
+    for _geo in (geo_q, geo_i, geo_a, geo_uc_fed, geo_uc_est, geo_uc_mun):
+        preprocessar_bboxes_kml(_geo)
+    dict_areas_especiais = {
+        "Quilombo": geo_q, "Terra Indígena": geo_i, "Sítio Arqueológico": geo_a,
+        "UC Federal": geo_uc_fed, "UC Estadual": geo_uc_est, "UC Municipal": geo_uc_mun
+    }
     
     with st.expander("🚧 6. Obras e Projetos", expanded=True):
         mostrar_todas_obras = st.checkbox("📍 TODAS AS OBRAS (Clusters)", value=False)
@@ -737,7 +826,14 @@ with kpi_container.container():
 # ==========================================
 # 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE E DARK MODE)
 # ==========================================
-mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canvas=True)
+zoom_mapa_atual = float(st.session_state.get("_mapa_zoom", 6.0))
+center_mapa_atual = st.session_state.get("_mapa_center", {"lat": MAPA_CENTRO_INICIAL[0], "lng": MAPA_CENTRO_INICIAL[1]})
+mapa = folium.Map(
+    location=[float(center_mapa_atual.get("lat", MAPA_CENTRO_INICIAL[0])), float(center_mapa_atual.get("lng", MAPA_CENTRO_INICIAL[1]))],
+    zoom_start=max(2, min(20, int(round(zoom_mapa_atual)))),
+    tiles=None,
+    prefer_canvas=True,
+)
 
 mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
 Draw(export=False, position='topleft').add_to(mapa)
@@ -793,9 +889,9 @@ if geo_data_ibge:
             if reg_mun in municipios_sel: return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
         elif regioes_sel:
-            if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
+            if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1.5, 'fillOpacity': 0.12}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
-        return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
+        return {'fillColor': 'transparent', 'color': '#7a7a7a', 'weight': 0.6, 'fillOpacity': 0}
 
     folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
 
@@ -827,51 +923,42 @@ todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
 
 
+# A rede NÃO é serializada no HTML inicial. Ela só é preparada quando o zoom
+# atual permite, e apenas para o retângulo que está visível no mapa.
 grupos_rede_zoom = []
+tree_grid = None
+grid_info = []
+df_busca = pd.DataFrame()
 
 if not df.empty:
-    df_mapa = df.copy()
+    df_base_rede = df.copy()
     if regioes_sel:
-        df_mapa = df_mapa[df_mapa['REGIONAL'].isin(regioes_sel)]
+        df_base_rede = df_base_rede[df_base_rede['REGIONAL'].isin(regioes_sel)]
     if municipios_sel:
-        df_mapa = df_mapa[df_mapa['MUNICIPIO'].isin(municipios_sel)]
-    df_mapa = df_mapa[df_mapa['ALIMENTADOR'].isin(alimentadores_visiveis)]
+        df_base_rede = df_base_rede[df_base_rede['MUNICIPIO'].isin(municipios_sel)]
+    if alimentadores_visiveis:
+        df_base_rede = df_base_rede[df_base_rede['ALIMENTADOR'].isin(alimentadores_visiveis)]
 
-    # Normaliza também registros já existentes no SQLite, evitando depender das cores antigas
-    # salvas em processamentos anteriores.
-    df_mapa = df_mapa.copy()
-    df_mapa['TIPO_REDE_CANON'] = df_mapa['TIPO_REDE'].apply(normalizar_tipo_rede)
+    df_base_rede = df_base_rede.copy()
+    df_base_rede['TIPO_REDE_CANON'] = df_base_rede['TIPO_REDE'].apply(normalizar_tipo_rede)
 
-    mask_camadas = pd.Series(False, index=df_mapa.index)
+    # Respeita as divisões existentes em cada KMZ. Todas permanecem disponíveis
+    # no controle do mapa; só quatro são marcadas por padrão.
+    mask_camadas = pd.Series(False, index=df_base_rede.index)
     for alim in alimentadores_visiveis:
         if alim in camadas_ativas:
             permitidas = {normalizar_tipo_rede(c) for c in camadas_ativas[alim]}
             mask_camadas = mask_camadas | (
-                (df_mapa['ALIMENTADOR'] == alim) &
-                (df_mapa['TIPO_REDE_CANON'].isin(permitidas))
+                (df_base_rede['ALIMENTADOR'] == alim) &
+                (df_base_rede['TIPO_REDE_CANON'].isin(permitidas))
             )
-    df_mapa = df_mapa[mask_camadas]
+    if alimentadores_visiveis:
+        df_base_rede = df_base_rede[mask_camadas]
 
-    grid_pts, grid_info = [], []
-    if not df_mapa.empty:
-        for _, row in df_mapa.iterrows():
-            if row['TIPO_GEOMETRIA'] == 'Ponto':
-                pt_lat, pt_lon = row['COORDS'][0], row['COORDS'][1]
-                grid_pts.append(latlon_to_xyz(pt_lat, pt_lon))
-                grid_info.append((row['TIPO_REDE_CANON'], row['NOME'], pt_lat, pt_lon))
-            else:
-                for pt in row['COORDS']:
-                    pt_lat, pt_lon = pt[0], pt[1]
-                    grid_pts.append(latlon_to_xyz(pt_lat, pt_lon))
-                    grid_info.append((row['TIPO_REDE_CANON'], row['NOME'], pt_lat, pt_lon))
-    tree_grid = cKDTree(grid_pts) if grid_pts else None
-
-    df_busca = pd.DataFrame()
-    nearest_idx = None
-
-    if busca_lat is not None and busca_lon is not None and not df_mapa.empty:
+    # Pesquisa continua funcionando mesmo em zoom baixo, sem carregar toda a malha.
+    if busca_lat is not None and busca_lon is not None and not df_base_rede.empty:
         pts, indices = [], []
-        for idx, row in df_mapa.iterrows():
+        for idx, row in df_base_rede.iterrows():
             if row['TIPO_GEOMETRIA'] == 'Ponto':
                 pts.append(latlon_to_xyz(row['COORDS'][0], row['COORDS'][1]))
                 indices.append(idx)
@@ -879,231 +966,209 @@ if not df.empty:
                 for pt in row['COORDS']:
                     pts.append(latlon_to_xyz(pt[0], pt[1]))
                     indices.append(idx)
-
         if pts:
-            tree = cKDTree(pts)
-            target_xyz = latlon_to_xyz(busca_lat, busca_lon)
-            _, min_idx_in_pts = tree.query(target_xyz)
+            tree_busca = cKDTree(pts)
+            _, min_idx_in_pts = tree_busca.query(latlon_to_xyz(busca_lat, busca_lon))
             nearest_idx = indices[min_idx_in_pts]
-
-            elem_prox = df_mapa.loc[nearest_idx]
+            elem_prox = df_base_rede.loc[nearest_idx]
             if elem_prox['TIPO_GEOMETRIA'] == 'Ponto':
                 dist_metros = haversine(busca_lat, busca_lon, elem_prox['COORDS'][0], elem_prox['COORDS'][1]) * 1000
             else:
-                dist_metros = min([
-                    haversine(busca_lat, busca_lon, pt[0], pt[1])
-                    for pt in elem_prox['COORDS']
-                ]) * 1000
-
+                dist_metros = min(haversine(busca_lat, busca_lon, p[0], p[1]) for p in elem_prox['COORDS']) * 1000
             st.sidebar.success(
                 f"🎯 **Alvo mais próximo:** {elem_prox['TIPO_REDE_CANON']} "
                 f"({elem_prox['NOME']}) a {dist_metros:.1f} metros."
             )
-            df_busca = df_mapa.loc[[nearest_idx]]
-            df_mapa = df_mapa.drop(nearest_idx)
-
+            df_busca = df_base_rede.loc[[nearest_idx]].copy()
     elif termo_pesquisa != "":
-        mask_nome = df_mapa['NOME'].astype(str).str.contains(termo_pesquisa, case=False, na=False)
-        df_busca = df_mapa[mask_nome]
-        df_mapa = df_mapa[~mask_nome]
+        mask_nome = df_base_rede['NOME'].astype(str).str.contains(termo_pesquisa, case=False, na=False)
+        df_busca = df_base_rede[mask_nome].copy()
 
-    # Uma FeatureGroup por divisão do KMZ. Isso cria caixas individuais no LayerControl do mapa.
-    grupos_por_tipo = {}
-    tipos_presentes = sorted(df_mapa['TIPO_REDE_CANON'].dropna().unique().tolist()) if not df_mapa.empty else []
-    for tipo in tipos_presentes:
-        rotulo = ROTULOS_REDE.get(tipo, tipo.title())
-        show_default = tipo in TIPOS_PADRAO_VISIVEIS
-        fg = folium.FeatureGroup(name=f"⚡ KMZ - {rotulo}", show=show_default, overlay=True)
-        fg.add_to(mapa)
-        grupos_por_tipo[tipo] = fg
-        grupos_rede_zoom.append((fg, show_default))
+    carregar_rede_detalhada = zoom_mapa_atual >= ZOOM_MINIMO_REDE
 
-    # Agrupa linhas e pontos por tipo para evitar milhares de camadas soltas no Leaflet.
-    features_linha_por_tipo = {tipo: [] for tipo in tipos_presentes}
-    features_ponto_por_tipo = {tipo: [] for tipo in tipos_presentes if tipo != 'TRANSFORMADOR'}
-    transformadores = []
+    if carregar_rede_detalhada and not df_base_rede.empty:
+        bbox = _extrair_bbox_leaflet(st.session_state.get("_mapa_bounds"))
+        if bbox is None:
+            bbox = _bbox_aproximado_por_zoom(center_mapa_atual, zoom_mapa_atual)
+        bbox = _expandir_bbox(bbox, 0.18)
 
-    for _, row in df_mapa.iterrows():
-        tipo = row['TIPO_REDE_CANON']
-        coord_txt = (
-            f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}"
-            if row['TIPO_GEOMETRIA'] == 'Ponto'
-            else "Linha de Múltiplos Pontos"
-        )
-        prop = {
-            "TIPO_REDE": ROTULOS_REDE.get(tipo, tipo.title()),
-            "NOME": str(row['NOME']),
-            "ALIMENTADOR": str(row['ALIMENTADOR']),
-            "MUNICIPIO": f"{row['MUNICIPIO']} - {row['REGIONAL']}",
-            "GPS": coord_txt,
-        }
+        # Primeiro corta pelo viewport; depois aplica a renderização progressiva.
+        mask_view = df_base_rede.apply(lambda row: _geometria_intersecta_bbox(row, bbox), axis=1)
+        df_mapa = df_base_rede[mask_view].copy()
+        tipos_zoom = _tipos_renderizaveis_no_zoom(zoom_mapa_atual)
 
-        if row['TIPO_GEOMETRIA'] == 'Linha':
-            coords = [[pt[1], pt[0]] for pt in row['COORDS']]
-            features_linha_por_tipo.setdefault(tipo, []).append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": prop,
-            })
-            for pt in row['COORDS']:
-                todas_lats.append(pt[0])
-                todas_lons.append(pt[1])
-        else:
-            lat, lon = row['COORDS'][0], row['COORDS'][1]
-            todas_lats.append(lat)
-            todas_lons.append(lon)
-            if tipo == 'TRANSFORMADOR':
-                transformadores.append((row, prop, lat, lon))
+        # Cria os nomes das divisões no LayerControl mesmo quando uma delas só
+        # terá geometria em um zoom maior (ex.: postes).
+        tipos_presentes = sorted(df_base_rede['TIPO_REDE_CANON'].dropna().unique().tolist())
+        grupos_por_tipo = {}
+        for tipo in tipos_presentes:
+            rotulo = ROTULOS_REDE.get(tipo, tipo.title())
+            show_default = tipo in TIPOS_PADRAO_VISIVEIS
+            fg = folium.FeatureGroup(name=f"⚡ KMZ - {rotulo}", show=show_default, overlay=True)
+            fg.add_to(mapa)
+            grupos_por_tipo[tipo] = fg
+
+        df_render = df_mapa[df_mapa['TIPO_REDE_CANON'].isin(tipos_zoom)].copy()
+
+        # Proteção adicional para não congelar o navegador em áreas muito densas.
+        # Em vez de corromper/truncar o KMZ, apenas pede mais zoom antes de desenhar.
+        MAX_ELEMENTOS_VIEWPORT = 18000
+        if len(df_render) > MAX_ELEMENTOS_VIEWPORT:
+            st.sidebar.warning(
+                f"⚠️ Área muito densa ({len(df_render):,} elementos). Aproxime mais o mapa para carregar os detalhes."
+                .replace(',', '.')
+            )
+            df_render = df_render.iloc[0:0]
+
+        # Índice espacial usado pelos popups de obras somente com o que já está no viewport.
+        grid_pts, grid_info = [], []
+        for _, row in df_render.iterrows():
+            if row['TIPO_GEOMETRIA'] == 'Ponto':
+                pt_lat, pt_lon = row['COORDS'][0], row['COORDS'][1]
+                grid_pts.append(latlon_to_xyz(pt_lat, pt_lon))
+                grid_info.append((row['TIPO_REDE_CANON'], row['NOME'], pt_lat, pt_lon))
             else:
-                features_ponto_por_tipo.setdefault(tipo, []).append({
+                for pt in row['COORDS']:
+                    grid_pts.append(latlon_to_xyz(pt[0], pt[1]))
+                    grid_info.append((row['TIPO_REDE_CANON'], row['NOME'], pt[0], pt[1]))
+        tree_grid = cKDTree(grid_pts) if grid_pts else None
+
+        features_linha_por_tipo = {tipo: [] for tipo in tipos_presentes}
+        features_ponto_por_tipo = {tipo: [] for tipo in tipos_presentes if tipo != 'TRANSFORMADOR'}
+        transformadores = []
+
+        for _, row in df_render.iterrows():
+            tipo = row['TIPO_REDE_CANON']
+            coord_txt = (
+                f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}"
+                if row['TIPO_GEOMETRIA'] == 'Ponto' else "Linha de Múltiplos Pontos"
+            )
+            prop = {
+                "TIPO_REDE": ROTULOS_REDE.get(tipo, tipo.title()),
+                "NOME": str(row['NOME']),
+                "ALIMENTADOR": str(row['ALIMENTADOR']),
+                "MUNICIPIO": f"{row['MUNICIPIO']} - {row['REGIONAL']}",
+                "GPS": coord_txt,
+            }
+            if row['TIPO_GEOMETRIA'] == 'Linha':
+                coords = [[pt[1], pt[0]] for pt in row['COORDS']]
+                features_linha_por_tipo.setdefault(tipo, []).append({
                     "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "geometry": {"type": "LineString", "coordinates": coords},
                     "properties": prop,
                 })
+            else:
+                lat, lon = row['COORDS'][0], row['COORDS'][1]
+                if tipo == 'TRANSFORMADOR':
+                    transformadores.append((row, prop, lat, lon))
+                else:
+                    features_ponto_por_tipo.setdefault(tipo, []).append({
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                        "properties": prop,
+                    })
 
-    def criar_tooltip_rede():
-        return folium.features.GeoJsonTooltip(
-            fields=['TIPO_REDE', 'NOME'],
-            aliases=['Rede:', 'Identificação:'],
-            style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 5px;",
-        )
-
-    def criar_popup_rede():
-        return folium.features.GeoJsonPopup(
-            fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'MUNICIPIO', 'GPS'],
-            aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'],
-            style="font-family: sans-serif; font-size: 13px; min-width: 250px;",
-        )
-
-    for tipo, feats in features_linha_por_tipo.items():
-        if not feats or tipo not in grupos_por_tipo:
-            continue
-        cor = CORES_REDE.get(tipo, '#555555')
-        peso = 4 if tipo == 'REDE PRIMARIA' else 3
-        folium.GeoJson(
-            {"type": "FeatureCollection", "features": feats},
-            style_function=lambda feature, c=cor, w=peso: {
-                'color': c,
-                'weight': w,
-                'opacity': 0.95,
-            },
-            tooltip=criar_tooltip_rede(),
-            popup=criar_popup_rede(),
-        ).add_to(grupos_por_tipo[tipo])
-
-    for tipo, feats in features_ponto_por_tipo.items():
-        if not feats or tipo not in grupos_por_tipo:
-            continue
-
-        # Poste: círculo cinza com contorno preto.
-        if tipo == 'POSTE':
-            marcador = folium.CircleMarker(
-                radius=4,
-                color='#000000',
-                weight=1.5,
-                fill=True,
-                fill_color='#808080',
-                fill_opacity=1.0,
+        def criar_tooltip_rede():
+            return folium.features.GeoJsonTooltip(
+                fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'Identificação:'],
+                style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 5px;",
             )
-        else:
+
+        def criar_popup_rede():
+            return folium.features.GeoJsonPopup(
+                fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'MUNICIPIO', 'GPS'],
+                aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'],
+                style="font-family: sans-serif; font-size: 13px; min-width: 250px;",
+            )
+
+        for tipo, feats in features_linha_por_tipo.items():
+            if not feats or tipo not in grupos_por_tipo:
+                continue
             cor = CORES_REDE.get(tipo, '#555555')
-            marcador = folium.CircleMarker(
-                radius=6,
-                color=cor,
-                weight=2,
-                fill=True,
-                fill_color=cor,
-                fill_opacity=1.0,
-            )
+            peso = 4 if tipo == 'REDE PRIMARIA' else 3
+            folium.GeoJson(
+                {"type": "FeatureCollection", "features": feats},
+                style_function=lambda feature, c=cor, w=peso: {'color': c, 'weight': w, 'opacity': 0.95},
+                tooltip=criar_tooltip_rede(), popup=criar_popup_rede(),
+            ).add_to(grupos_por_tipo[tipo])
 
-        folium.GeoJson(
-            {"type": "FeatureCollection", "features": feats},
-            marker=marcador,
-            tooltip=criar_tooltip_rede(),
-            popup=criar_popup_rede(),
-        ).add_to(grupos_por_tipo[tipo])
+        for tipo, feats in features_ponto_por_tipo.items():
+            if not feats or tipo not in grupos_por_tipo:
+                continue
+            if tipo == 'POSTE':
+                marcador = folium.CircleMarker(
+                    radius=4, color='#000000', weight=1.5, fill=True,
+                    fill_color='#808080', fill_opacity=1.0,
+                )
+            else:
+                cor = CORES_REDE.get(tipo, '#555555')
+                marcador = folium.CircleMarker(
+                    radius=6, color=cor, weight=2, fill=True,
+                    fill_color=cor, fill_opacity=1.0,
+                )
+            folium.GeoJson(
+                {"type": "FeatureCollection", "features": feats},
+                marker=marcador, tooltip=criar_tooltip_rede(), popup=criar_popup_rede(),
+            ).add_to(grupos_por_tipo[tipo])
 
-    # Transformador: triângulo amarelo com contorno amarelo.
-    for row, prop, lat, lon in transformadores:
-        popup_html = f"""
-        <div style='font-family:sans-serif;min-width:240px'>
-          <b>Rede:</b> Transformador<br>
-          <b>Identificação:</b> {html.escape(str(row['NOME']))}<br>
-          <b>Alimentador:</b> {html.escape(str(row['ALIMENTADOR']))}<br>
-          <b>Localização:</b> {html.escape(str(row['MUNICIPIO']))} - {html.escape(str(row['REGIONAL']))}<br>
-          <b>Coordenadas:</b> {lat:.5f}, {lon:.5f}
-        </div>
-        """
-        folium.RegularPolygonMarker(
-            location=[lat, lon],
-            number_of_sides=3,
-            radius=7,
-            rotation=0,
-            color='#FFD700',
-            weight=2,
-            fill=True,
-            fill_color='#FFD700',
-            fill_opacity=1.0,
-            tooltip=f"Transformador: {html.escape(str(row['NOME']))}",
-            popup=folium.Popup(popup_html, max_width=350),
-        ).add_to(grupos_por_tipo['TRANSFORMADOR'])
+        # Transformador: triângulo amarelo com contorno amarelo.
+        if 'TRANSFORMADOR' in grupos_por_tipo:
+            for row, prop, lat, lon in transformadores:
+                popup_html = f"""
+                <div style='font-family:sans-serif;min-width:240px'>
+                  <b>Rede:</b> Transformador<br>
+                  <b>Identificação:</b> {html.escape(str(row['NOME']))}<br>
+                  <b>Alimentador:</b> {html.escape(str(row['ALIMENTADOR']))}<br>
+                  <b>Localização:</b> {html.escape(str(row['MUNICIPIO']))} - {html.escape(str(row['REGIONAL']))}<br>
+                  <b>Coordenadas:</b> {lat:.5f}, {lon:.5f}
+                </div>
+                """
+                folium.RegularPolygonMarker(
+                    location=[lat, lon], number_of_sides=3, radius=7, rotation=0,
+                    color='#FFD700', weight=2, fill=True, fill_color='#FFD700', fill_opacity=1.0,
+                    tooltip=f"Transformador: {html.escape(str(row['NOME']))}",
+                    popup=folium.Popup(popup_html, max_width=350),
+                ).add_to(grupos_por_tipo['TRANSFORMADOR'])
 
-    # Resultado da pesquisa sempre fica visível, mesmo abaixo do zoom mínimo.
-    fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
-    for _, row in df_busca.iterrows():
-        coord_txt = (
-            f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}"
-            if row['TIPO_GEOMETRIA'] == 'Ponto'
-            else "Linha de Múltiplos Pontos"
-        )
-        if row['TIPO_GEOMETRIA'] == 'Ponto':
-            sv_lat, sv_lon = row['COORDS'][0], row['COORDS'][1]
-        else:
-            sv_lat, sv_lon = row['COORDS'][0][0], row['COORDS'][0][1]
-        sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={sv_lat},{sv_lon}"
-        html_popup = f"""
-        <div style="min-width: 250px; font-family: sans-serif;">
-            <h4 style="margin-top: 0; color: #FF00FF; border-bottom: 2px solid #FF00FF; padding-bottom: 5px;">{row['TIPO_REDE_CANON']}</h4>
-            <table style="width:100%;">
-                <tr><td style="color: #555; padding: 2px;"><b>IDENTIFICAÇÃO:</b></td><td>{html.escape(str(row['NOME']))}</td></tr>
-                <tr><td style="color: #555; padding: 2px;"><b>LOCAL:</b></td><td>{html.escape(str(row['MUNICIPIO']))}</td></tr>
-                <tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr>
-            </table>
-        </div>
-        """
-        popup = folium.Popup(html_popup, max_width=350)
-        if row['TIPO_GEOMETRIA'] == 'Linha':
-            folium.PolyLine(
-                locations=row['COORDS'],
-                color='#FF00FF',
-                weight=8,
-                opacity=1.0,
-                popup=popup,
-                tooltip=f"ALVO ENCONTRADO: {html.escape(str(row['NOME']))}",
-            ).add_to(fg_busca)
-            for pt in row['COORDS']:
-                busca_lats.append(pt[0])
-                busca_lons.append(pt[1])
-        else:
+    # Resultado da pesquisa sempre fica visível e não depende do zoom.
+    if not df_busca.empty or (busca_lat is not None and busca_lon is not None):
+        fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
+        for _, row in df_busca.iterrows():
+            if row['TIPO_GEOMETRIA'] == 'Ponto':
+                sv_lat, sv_lon = row['COORDS'][0], row['COORDS'][1]
+            else:
+                sv_lat, sv_lon = row['COORDS'][0][0], row['COORDS'][0][1]
+            sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={sv_lat},{sv_lon}"
+            html_popup = f"""
+            <div style="min-width: 250px; font-family: sans-serif;">
+                <h4 style="margin-top: 0; color: #FF00FF; border-bottom: 2px solid #FF00FF; padding-bottom: 5px;">{row['TIPO_REDE_CANON']}</h4>
+                <table style="width:100%;">
+                    <tr><td style="color: #555; padding: 2px;"><b>IDENTIFICAÇÃO:</b></td><td>{html.escape(str(row['NOME']))}</td></tr>
+                    <tr><td style="color: #555; padding: 2px;"><b>LOCAL:</b></td><td>{html.escape(str(row['MUNICIPIO']))}</td></tr>
+                    <tr><td colspan='2' style='padding-top:10px;'><a href="{sv_url}" target="_blank" style="color: #0066cc; font-weight: bold; text-decoration: none;">👁️ Abrir Street View</a></td></tr>
+                </table>
+            </div>
+            """
+            popup = folium.Popup(html_popup, max_width=350)
+            if row['TIPO_GEOMETRIA'] == 'Linha':
+                folium.PolyLine(
+                    locations=row['COORDS'], color='#FF00FF', weight=8, opacity=1.0,
+                    popup=popup, tooltip=f"ALVO ENCONTRADO: {html.escape(str(row['NOME']))}",
+                ).add_to(fg_busca)
+                for pt in row['COORDS']:
+                    busca_lats.append(pt[0]); busca_lons.append(pt[1])
+            else:
+                folium.Marker(
+                    location=row['COORDS'], icon=folium.Icon(color='purple', icon='star'),
+                    popup=popup, tooltip=f"ALVO ENCONTRADO: {html.escape(str(row['NOME']))}",
+                ).add_to(fg_busca)
+                busca_lats.append(row['COORDS'][0]); busca_lons.append(row['COORDS'][1])
+        if busca_lat is not None and busca_lon is not None:
             folium.Marker(
-                location=row['COORDS'],
-                icon=folium.Icon(color='purple', icon='star'),
-                popup=popup,
-                tooltip=f"ALVO ENCONTRADO: {html.escape(str(row['NOME']))}",
+                location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'),
+                tooltip="Sua Pesquisa GPS",
             ).add_to(fg_busca)
-            busca_lats.append(row['COORDS'][0])
-            busca_lons.append(row['COORDS'][1])
-
-    if busca_lat is not None and busca_lon is not None:
-        folium.Marker(
-            location=[busca_lat, busca_lon],
-            icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'),
-            tooltip="Sua Pesquisa GPS",
-        ).add_to(fg_busca)
-    fg_busca.add_to(mapa)
-
-else:
-    tree_grid = None
+        fg_busca.add_to(mapa)
 
 def calcular_rede_proxima(lat, lon):
     if not tree_grid: return "<span style='color:gray'>Ative um alimentador no filtro para calcular</span>"
@@ -1245,81 +1310,8 @@ if mostrar_clima:
         st.sidebar.warning("⚠️ Serviço de radar climático temporariamente indisponível na API central.")
 
 
-# Rede detalhada só é desenhada visualmente quando o usuário aproxima o mapa.
-# Os objetos continuam disponíveis no LayerControl para serem marcados/desmarcados.
-if grupos_rede_zoom:
-    map_id_rede = mapa.get_name()
-    grupos_js = []
-    for fg, show_default in grupos_rede_zoom:
-        grupos_js.append(
-            "{layer:%s, desired:%s}" % (fg.get_name(), 'true' if show_default else 'false')
-        )
-    grupos_js_txt = ",".join(grupos_js)
-
-    js_zoom_rede = f"""
-    <script>
-    setTimeout(function() {{
-        var mapaRede = {map_id_rede};
-        var zoomMinimoRede = {ZOOM_MINIMO_REDE};
-        var gruposRede = [{grupos_js_txt}];
-        var suprimirEventosRede = false;
-
-        function itemGrupo(layer) {{
-            for (var i = 0; i < gruposRede.length; i++) {{
-                if (gruposRede[i].layer === layer) return gruposRede[i];
-            }}
-            return null;
-        }}
-
-        function aplicarZoomRede() {{
-            suprimirEventosRede = true;
-            var podeMostrar = mapaRede.getZoom() >= zoomMinimoRede;
-            gruposRede.forEach(function(item) {{
-                var estaNoMapa = mapaRede.hasLayer(item.layer);
-                if (!podeMostrar && estaNoMapa) {{
-                    mapaRede.removeLayer(item.layer);
-                }} else if (podeMostrar && item.desired && !estaNoMapa) {{
-                    mapaRede.addLayer(item.layer);
-                }}
-            }});
-            suprimirEventosRede = false;
-        }}
-
-        mapaRede.on('overlayadd', function(e) {{
-            var item = itemGrupo(e.layer);
-            if (!item || suprimirEventosRede) return;
-            item.desired = true;
-            if (mapaRede.getZoom() < zoomMinimoRede) {{
-                setTimeout(aplicarZoomRede, 0);
-            }}
-        }});
-
-        mapaRede.on('overlayremove', function(e) {{
-            var item = itemGrupo(e.layer);
-            if (!item || suprimirEventosRede) return;
-            item.desired = false;
-        }});
-
-        mapaRede.on('zoomend', aplicarZoomRede);
-        aplicarZoomRede();
-
-        var aviso = L.control({{position: 'bottomleft'}});
-        aviso.onAdd = function() {{
-            var div = L.DomUtil.create('div', 'info');
-            div.style.background = 'rgba(255,255,255,0.92)';
-            div.style.padding = '6px 9px';
-            div.style.borderRadius = '6px';
-            div.style.boxShadow = '0 1px 4px rgba(0,0,0,.25)';
-            div.style.fontSize = '12px';
-            div.innerHTML = '⚡ Rede detalhada visível a partir do zoom ' + zoomMinimoRede;
-            return div;
-        }};
-        aviso.addTo(mapaRede);
-    }}, 500);
-    </script>
-    """
-    mapa.get_root().html.add_child(folium.Element(js_zoom_rede))
-
+# A malha já foi filtrada no servidor pelo zoom e pelo viewport.
+# O LayerControl continua permitindo marcar/desmarcar as divisões disponíveis.
 folium.LayerControl(position='topright', collapsed=False).add_to(mapa)
 
 # -------------------------------------------------------------
@@ -1374,10 +1366,43 @@ elif municipios_sel and geo_data_ibge:
             elif geom['type'] == 'MultiPolygon':
                 for poly in geom['coordinates']:
                     for pt in poly[0]: mun_foco_lats.append(pt[1]); mun_foco_lons.append(pt[0])
-    if mun_foco_lats and mun_foco_lons: mapa.fit_bounds([[min(mun_foco_lats), min(mun_foco_lons)], [max(mun_foco_lats), max(mun_foco_lons)]])
-    elif todas_lats and todas_lons: mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
-elif todas_lats and todas_lons: 
-    mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
+    if mun_foco_lats and mun_foco_lons:
+        mapa.fit_bounds([[min(mun_foco_lats), min(mun_foco_lons)], [max(mun_foco_lats), max(mun_foco_lons)]])
 
 with map_container:
-    st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
+    estado_mapa = st_folium(
+        mapa,
+        use_container_width=True,
+        height=850,
+        returned_objects=["zoom", "bounds"],
+        key="mapa_principal",
+    )
+
+# Salva o viewport devolvido pelo Leaflet. Quando o usuário dá zoom/pan, fazemos
+# uma única reconstrução adicional para buscar apenas os elementos daquela tela.
+if isinstance(estado_mapa, dict):
+    novo_zoom = estado_mapa.get("zoom")
+    novos_bounds = estado_mapa.get("bounds")
+
+    zoom_mudou = False
+    bounds_mudou = False
+    if novo_zoom is not None:
+        try:
+            novo_zoom_f = float(novo_zoom)
+            zoom_mudou = abs(novo_zoom_f - float(st.session_state.get("_mapa_zoom", 6.0))) > 0.01
+            st.session_state["_mapa_zoom"] = novo_zoom_f
+        except (TypeError, ValueError):
+            pass
+    if isinstance(novos_bounds, dict):
+        anterior = st.session_state.get("_mapa_bounds")
+        bounds_mudou = novos_bounds != anterior
+        st.session_state["_mapa_bounds"] = novos_bounds
+        bbox_evento = _extrair_bbox_leaflet(novos_bounds)
+        if bbox_evento is not None:
+            sul, oeste, norte, leste = bbox_evento
+            st.session_state["_mapa_center"] = {"lat": (sul + norte) / 2.0, "lng": (oeste + leste) / 2.0}
+
+    zoom_salvo = float(st.session_state.get("_mapa_zoom", 6.0))
+    # Em zoom baixo não há malha para recarregar, então pan não provoca trabalho extra.
+    if zoom_mudou or (zoom_salvo >= ZOOM_MINIMO_REDE and bounds_mudou):
+        st.rerun()
