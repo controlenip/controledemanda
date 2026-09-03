@@ -162,14 +162,7 @@ def get_kml_cached(path, color):
     return ler_kml_para_geojson(path, color)
 
 def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
-    # Dicionário de cores ajustado (Azul Primária, Magenta Secundária, Cinza Poste, Amarelo Transformador)
-    dict_cores = {
-        'REDE PRIMÁRIA': '#0000FF', 'REDE PRIMARIA': '#0000FF', 
-        'REDE SECUNDÁRIA': '#FF00FF', 'REDE SECUNDARIA': '#FF00FF', 
-        'POSTE': '#808080', 'TRANSFORMADOR': '#FFFF00', 
-        'CHAVE': '#3cb44b', 'REGULADOR': '#911eb4', 'RELIGADOR': '#46f0f0', 
-        'CAPACITOR': '#ffe119', 'SUBESTAÇÃO': '#000000', 'SUBESTACAO': '#000000'
-    }
+    dict_cores = {'REDE PRIMÁRIA': '#e6194b', 'REDE PRIMARIA': '#e6194b', 'REDE SECUNDÁRIA': '#4363d8', 'REDE SECUNDARIA': '#4363d8', 'POSTE': '#808080', 'TRANSFORMADOR': '#f58231', 'CHAVE': '#3cb44b', 'REGULADOR': '#911eb4', 'RELIGADOR': '#46f0f0', 'CAPACITOR': '#ffe119', 'SUBESTAÇÃO': '#000000', 'SUBESTACAO': '#000000'}
     nome_arquivo = f_name.upper().replace('.KMZ', '').replace('.KML', '')
     conteudo_kml = ""
     if f_name.lower().endswith('.kmz'):
@@ -417,13 +410,18 @@ with st.sidebar:
     with st.expander("📥 1. Banco de Dados e Sincronização", expanded=True):
         st.markdown("A ferramenta lê as redes automaticamente da pasta **`kmzs`** no repositório.")
         
+        # Garante que a pasta kmzs exista
         pasta_kmz = "kmzs"
         if not os.path.exists(pasta_kmz):
             os.makedirs(pasta_kmz, exist_ok=True)
             
+        # Lista os arquivos disponíveis no GitHub localmente
         arquivos_repositorio = [f for f in os.listdir(pasta_kmz) if f.lower().endswith(('.kmz', '.kml'))]
+        
+        # Compara com o que já foi salvo no Banco de Dados
         alims_no_banco = set(df['ALIMENTADOR'].tolist()) if not df.empty else set()
         
+        # Filtra apenas os arquivos que ainda não foram convertidos para o banco
         arquivos_novos = []
         for f in arquivos_repositorio:
             nome_alim = f.upper().replace('.KMZ', '').replace('.KML', '')
@@ -498,6 +496,7 @@ with st.sidebar:
         lista_alimentadores = sorted(df_filt['ALIMENTADOR'].unique().tolist()) if not df_filt.empty else []
         alim_sel = st.multiselect("⚡ Alimentador:", lista_alimentadores)
         
+        # OTIMIZAÇÃO: Anti-Travamento de Tela
         LIMITE_REDES_SIMULTANEAS = 15
         if not alim_sel:
             if len(lista_alimentadores) > LIMITE_REDES_SIMULTANEAS:
@@ -508,9 +507,15 @@ with st.sidebar:
         else:
             alimentadores_visiveis = alim_sel
 
+    camadas_ativas = {}
     if not df.empty and alimentadores_visiveis:
-        with st.expander("🗂️ 4. Controle de Camadas", expanded=False):
-            st.info("💡 As camadas individuais (Postes, Transformadores, etc) agora são ativadas/desativadas **diretamente no controle do mapa** (ícone branco no canto superior direito), garantindo mais velocidade!")
+        with st.expander("🗂️ 4. Camadas (Desempenho)", expanded=False):
+            for alim in alimentadores_visiveis:
+                st.markdown(f"**{alim}**")
+                lista_camadas_alim = sorted(df[df['ALIMENTADOR'] == alim]['TIPO_REDE'].unique().tolist())
+                camadas_essenciais = ['REDE PRIMÁRIA', 'REDE PRIMARIA', 'REDE SECUNDÁRIA', 'REDE SECUNDARIA', 'TRANSFORMADOR', 'POSTE', 'CAPACITOR', 'CHAVE', 'REGULADOR', 'RELIGADOR', 'SUBESTAÇÃO', 'SUBESTACAO']
+                camadas_default = [c for c in lista_camadas_alim if c in camadas_essenciais]
+                camadas_ativas[alim] = st.multiselect("Visibilidade:", lista_camadas_alim, default=camadas_default, key=f"ms_{alim}")
             
     with st.expander("🗺️ 5. Áreas Especiais", expanded=False):
         mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=True)
@@ -625,6 +630,7 @@ mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canva
 mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
 Draw(export=False, position='topleft').add_to(mapa)
 
+# 🇧🇷 TRADUÇÃO DOS CONTROLES DE DESENHO (DRAW) PARA PORTUGUÊS (PT-BR)
 js_draw_loc = """
 <script>
     setTimeout(function() {
@@ -654,6 +660,7 @@ js_draw_loc = """
 """
 mapa.get_root().html.add_child(folium.Element(js_draw_loc))
 
+# Camadas base: Usando o servidor da ESRI para o mapa escuro (Garante zero marca d'água)
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(
@@ -670,14 +677,13 @@ if geo_data_ibge:
         reg_mun = feature['properties'].get('MUNICIPIO', '')
         reg_name = feature['properties'].get('REGIONAL', '')
         cor_regiao = feature['properties']['fillColor']
-        # fillOpacity 0 limpa qualquer mancha de fundo cinza, exibindo apenas as divisões limpas
         if municipios_sel:
             if reg_mun in municipios_sel: return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
         elif regioes_sel:
-            if reg_name in regioes_sel: return {'fillColor': 'transparent', 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0}
+            if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
-        return {'fillColor': 'transparent', 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0}
+        return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.75}
 
     folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
 
@@ -707,8 +713,6 @@ if geo_data_ibge:
 
 todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
-grid_pts, grid_info = [], []
-tree_grid = None
 
 if not df.empty:
     df_mapa = df.copy()
@@ -716,6 +720,12 @@ if not df.empty:
     if municipios_sel: df_mapa = df_mapa[df_mapa['MUNICIPIO'].isin(municipios_sel)]
     df_mapa = df_mapa[df_mapa['ALIMENTADOR'].isin(alimentadores_visiveis)]
 
+    mask_camadas = pd.Series(False, index=df_mapa.index)
+    for alim in alimentadores_visiveis:
+        if alim in camadas_ativas: mask_camadas = mask_camadas | ((df_mapa['ALIMENTADOR'] == alim) & (df_mapa['TIPO_REDE'].isin(camadas_ativas[alim])))
+    df_mapa = df_mapa[mask_camadas]
+
+    grid_pts, grid_info = [], []
     if not df_mapa.empty:
         for idx, row in df_mapa.iterrows():
             if row['TIPO_GEOMETRIA'] == 'Ponto':
@@ -727,7 +737,7 @@ if not df.empty:
                     pt_lat, pt_lon = pt[0], pt[1]
                     grid_pts.append(latlon_to_xyz(pt_lat, pt_lon))
                     grid_info.append((row['TIPO_REDE'], row['NOME'], pt_lat, pt_lon))
-        tree_grid = cKDTree(grid_pts) if grid_pts else None
+    tree_grid = cKDTree(grid_pts) if grid_pts else None
 
     df_busca = pd.DataFrame()
     nearest_idx = None
@@ -762,78 +772,41 @@ if not df.empty:
         df_busca = df_mapa[mask_nome]
         df_mapa = df_mapa[~mask_nome]
 
-    # ==============================================================
-    # RENDERIZAÇÃO EM LOTE - ANTI-TRAVAMENTO DE MEMÓRIA (GEOJSON)
-    # ==============================================================
-    fg_dict = {}
-    # Deixa marcado por padrão apenas o que é essencial 
-    camadas_padrao = ['TRANSFORMADOR', 'POSTE', 'REDE PRIMÁRIA', 'REDE PRIMARIA', 'REDE SECUNDÁRIA', 'REDE SECUNDARIA']
+    features = []
+    for _, row in df_mapa.iterrows():
+        coord_txt = f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}" if row['TIPO_GEOMETRIA'] == 'Ponto' else "Linha de Múltiplos Pontos"
+        prop = {
+            "TIPO_REDE": str(row['TIPO_REDE']), "NOME": str(row['NOME']), "ALIMENTADOR": str(row['ALIMENTADOR']),
+            "MUNICIPIO": f"{row['MUNICIPIO']} - {row['REGIONAL']}", "GPS": coord_txt, "COR": row['COR']
+        }
+        if row['TIPO_GEOMETRIA'] == 'Linha':
+            coords = [[pt[1], pt[0]] for pt in row['COORDS']]
+            geom = {"type": "LineString", "coordinates": coords}
+            for pt in row['COORDS']: todas_lats.append(pt[0]); todas_lons.append(pt[1])
+        else:
+            coords = [row['COORDS'][1], row['COORDS'][0]]
+            geom = {"type": "Point", "coordinates": coords}
+            todas_lats.append(row['COORDS'][0]); todas_lons.append(row['COORDS'][1])
+            
+        features.append({"type": "Feature", "geometry": geom, "properties": prop})
 
-    for tipo in df_mapa['TIPO_REDE'].unique():
-        is_visible = any(padrao in tipo.upper() for padrao in camadas_padrao)
-        fg_dict[tipo] = folium.FeatureGroup(name=tipo, show=is_visible)
-        
-        df_tipo = df_mapa[df_mapa['TIPO_REDE'] == tipo]
-        
-        features_linhas = []
-        features_postes = []
-        features_outros = []
-        
-        for _, row in df_tipo.iterrows():
-            prop = {"TIPO_REDE": str(row['TIPO_REDE']), "NOME": str(row['NOME']), "ALIMENTADOR": str(row['ALIMENTADOR'])}
-            cor = row.get('COR', '#333333')
-            
-            if row['TIPO_GEOMETRIA'] == 'Linha':
-                coords = [[pt[1], pt[0]] for pt in row['COORDS']]
-                features_linhas.append({"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}, "properties": prop})
-                for pt in row['COORDS']: todas_lats.append(pt[0]); todas_lons.append(pt[1])
-            else:
-                lat, lon = row['COORDS'][0], row['COORDS'][1]
-                todas_lats.append(lat); todas_lons.append(lon)
-                
-                # Transformador tratado individualmente para conseguir desenhar um triângulo (por serem poucos, não trava)
-                if 'TRANSFORMADOR' in tipo.upper():
-                    html_popup = f"<div style='font-family:sans-serif;'><b>Rede:</b> {tipo}<br><b>ID:</b> {row['NOME']}<br><b>Alimentador:</b> {row['ALIMENTADOR']}</div>"
-                    folium.RegularPolygonMarker(
-                        location=[lat, lon], number_of_sides=3, radius=7, 
-                        color='#FFFF00', fill_color='#FFFF00', weight=2, fill_opacity=1,
-                        tooltip=f"{tipo}: {row['NOME']}", popup=folium.Popup(html_popup, max_width=300)
-                    ).add_to(fg_dict[tipo])
-                # Postes separados para GeoJSON (se processar no 'for' comum o mapa quebra a memória)
-                elif 'POSTE' in tipo.upper():
-                    features_postes.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": prop})
-                else:
-                    features_outros.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": prop})
+    if features:
+        geojson_data = {"type": "FeatureCollection", "features": features}
+        def style_fn(feature):
+            cor = feature['properties']['COR']
+            tipo = feature['properties']['TIPO_REDE']
+            if feature['geometry']['type'] == 'LineString': return {'color': cor, 'weight': 4 if 'PRIM' in tipo else 3, 'opacity': 0.8}
+            else: 
+                raio = 6
+                if 'POSTE' in tipo: raio = 6
+                elif any(x in tipo for x in ['TRANSFORMADOR', 'CHAVE', 'REGULADOR', 'RELIGADOR', 'SUBESTA', 'CAPACITOR']): raio = 12
+                return {'color': cor, 'fillColor': cor, 'fillOpacity': 1.0, 'radius': raio, 'weight': 2}
 
-        # Processamento das listas agregadas no GeoJSON
-        if features_linhas:
-            cor_linha = '#0000FF' if 'PRIM' in tipo.upper() else '#FF00FF'
-            peso_linha = 4 if 'PRIM' in tipo.upper() else 2
-            folium.GeoJson(
-                {"type": "FeatureCollection", "features": features_linhas},
-                style_function=lambda x, c=cor_linha, w=peso_linha: {'color': c, 'weight': w, 'opacity': 0.9},
-                tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'ID:'])
-            ).add_to(fg_dict[tipo])
-            
-        if features_postes:
-            folium.GeoJson(
-                {"type": "FeatureCollection", "features": features_postes},
-                marker=folium.CircleMarker(radius=4, color='black', fillColor='#808080', weight=1, fillOpacity=1),
-                tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'ID:'])
-            ).add_to(fg_dict[tipo])
-            
-        if features_outros:
-            folium.GeoJson(
-                {"type": "FeatureCollection", "features": features_outros},
-                marker=folium.CircleMarker(radius=5, color='black', fillColor='white', weight=1, fillOpacity=1),
-                tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'ID:'])
-            ).add_to(fg_dict[tipo])
-            
-        fg_dict[tipo].add_to(mapa)
+        folium.GeoJson(geojson_data, name="Rede Elétrica", style_function=style_fn, marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1), tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'Identificação:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 5px;"), popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'MUNICIPIO', 'GPS'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'], style="font-family: sans-serif; font-size: 13px; min-width: 250px;")).add_to(mapa)
 
-    # --------------------------------------------------------------
     fg_busca = folium.FeatureGroup(name="Resultado da Pesquisa", show=True)
     for _, row in df_busca.iterrows():
+        coord_txt = f"{row['COORDS'][0]:.5f}, {row['COORDS'][1]:.5f}" if row['TIPO_GEOMETRIA'] == 'Ponto' else "Linha de Múltiplos Pontos"
         sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={row['COORDS'][0]},{row['COORDS'][1]}"
         html_popup = f"""
         <div style="min-width: 250px; font-family: sans-serif;">
@@ -855,6 +828,9 @@ if not df.empty:
     if busca_lat is not None and busca_lon is not None: folium.Marker(location=[busca_lat, busca_lon], icon=folium.Icon(color='orange', icon='map-pin', prefix='fa'), tooltip="Sua Pesquisa GPS").add_to(fg_busca)
     fg_busca.add_to(mapa)
 
+else:
+    tree_grid = None
+
 def calcular_rede_proxima(lat, lon):
     if not tree_grid: return "<span style='color:gray'>Ative um alimentador no filtro para calcular</span>"
     xyz = latlon_to_xyz(lat, lon)
@@ -864,26 +840,21 @@ def calcular_rede_proxima(lat, lon):
     return f"<b>{tipo}</b> {nome} ({dist_m:.1f}m)"
 
 # ==========================================
-# RENDERIZAÇÃO DAS ÁREAS ESPECIAIS (SEM MANCHAS CINZAS)
+# RENDERIZAÇÃO DAS ÁREAS ESPECIAIS (COM POPUPS)
 # ==========================================
 def adicionar_camada_area(geo_data, nome_camada, mapa_obj, cor, is_ponto=False):
     if geo_data:
-        # fillOpacity 0 remove totalmente as manchas cinzas e exibe só contorno
-        estilo = lambda x: {'fillColor': 'transparent', 'color': cor, 'weight': 2, 'fillOpacity': 0.0}
+        estilo = lambda x: {'fillColor': cor, 'color': cor, 'weight': 2, 'fillOpacity': 0.4}
         marcador = folium.CircleMarker(radius=6, fill=True, fillOpacity=1, color=cor) if is_ponto else None
-        
-        # Áreas começam escondidas por padrão para visual mais limpo 
-        fg_area = folium.FeatureGroup(name=nome_camada, show=False)
         
         folium.GeoJson(
             geo_data, 
+            name=nome_camada, 
             style_function=estilo if not is_ponto else None,
             marker=marcador,
             tooltip=folium.features.GeoJsonTooltip(fields=['NOME'], aliases=['Área Específica:']),
             popup=folium.features.GeoJsonPopup(fields=['NOME'], aliases=['Nome do Local:'], style="font-family: sans-serif; font-size: 14px; min-width: 200px;")
-        ).add_to(fg_area)
-        
-        fg_area.add_to(mapa_obj)
+        ).add_to(mapa_obj)
 
 if mostrar_quilombos: adicionar_camada_area(geo_q, "Áreas Quilombolas", mapa, "#ff7f00")
 if mostrar_indigenas: adicionar_camada_area(geo_i, "Terras Indígenas", mapa, "#2ca02c")
@@ -907,7 +878,7 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
         if heat_data: HeatMap(heat_data, radius=15, blur=10, name="🔥 Densidade de Obras").add_to(mapa)
     
     if mostrar_todas_obras:
-        cluster_todas = MarkerCluster(name="Todas as Obras (Geral)", show=False)
+        cluster_todas = MarkerCluster(name="Todas as Obras (Geral)")
         if df_concluidas is not None:
             for _, row in df_concluidas.iterrows():
                 lat, lon = row['LAT_CLEAN'], row['LON_CLEAN']
@@ -978,7 +949,7 @@ if (mostrar_concluidas or mostrar_conflitantes or mostrar_heatmap or mostrar_tod
         fg_andamento.add_to(mapa)
 
 # ==========================================
-# 🌩️ INTEGRAÇÃO DE RADARES EXTERNOS E CONTROLE DE CAMADAS
+# 🌩️ INTEGRAÇÃO DE RADARES EXTERNOS (STREET VIEW E CLIMA)
 # ==========================================
 if mostrar_streetview:
     folium.TileLayer(
@@ -999,7 +970,6 @@ if mostrar_clima:
     if not url_chuva and not url_nuvem:
         st.sidebar.warning("⚠️ Serviço de radar climático temporariamente indisponível na API central.")
 
-# ADICIONA O CONTROLE DE MARCAR/DESMARCAR NO CANTO SUPERIOR DIREITO
 folium.LayerControl(position='topright').add_to(mapa)
 
 # -------------------------------------------------------------
@@ -1060,5 +1030,4 @@ elif todas_lats and todas_lons:
     mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
 
 with map_container:
-    # returned_objects vazio impede travamento extra entre clique do cliente e o python
     st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
