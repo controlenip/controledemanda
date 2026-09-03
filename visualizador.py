@@ -12,13 +12,13 @@ import unicodedata
 import folium
 from folium.plugins import HeatMap, MarkerCluster, MeasureControl, Draw
 import gc
+from streamlit_folium import st_folium
 import html
 from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
 import plotly.express as px
 import sqlite3
 import json
-import streamlit.components.v1 as components # NOVO MOTOR GRÁFICO
 
 st.set_page_config(page_title="Gestão de Malha e Projetos", page_icon="🗺️", layout="wide")
 
@@ -258,7 +258,12 @@ def carregar_banco_redes():
         df = pd.read_sql("SELECT * FROM malha", conn)
         conn.close()
         if not df.empty:
-            df['COORDS'] = df['COORDS'].apply(json.loads)
+            # Blindagem: Evita que erros em dados individuais quebrem o carregamento
+            def safe_json_loads(x):
+                try: return json.loads(x)
+                except: return None
+            df['COORDS'] = df['COORDS'].apply(safe_json_loads)
+            df = df.dropna(subset=['COORDS'])
         return df
     except:
         return pd.DataFrame()
@@ -454,13 +459,13 @@ with st.sidebar:
                 for i in range(0, len(lista_adapters), tamanho_lote):
                     lote_atual = (i // tamanho_lote) + 1
                     lote_arquivos = lista_adapters[i:i+tamanho_lote]
-                    texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes}...")
+                    texto_status.text(f"⏳ Processando e Salvando Lote {lote_atual} de {total_lotes}...")
                     qtd_total_processados += processar_e_salvar_kmz_paralelo(lote_arquivos)
                     barra_progresso.progress(lote_atual / total_lotes)
                     gc.collect()
                     
                 if qtd_total_processados > 0:
-                    st.success(f"✅ Sincronização finalizada! {qtd_total_processados} redes salvas.")
+                    st.success(f"✅ Sincronização finalizada! {qtd_total_processados} redes salvas no banco de dados rápido.")
                     carregar_banco_redes.clear()
                     time.sleep(2)
                     st.rerun()
@@ -581,7 +586,7 @@ with st.sidebar:
                 conn.commit()
                 conn.close()
                 carregar_banco_redes.clear()
-                st.success("Excluído!")
+                st.success("Excluído do Banco de Dados!")
                 time.sleep(1)
                 st.rerun()
 
@@ -632,11 +637,43 @@ mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canva
 mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
 Draw(export=False, position='topleft').add_to(mapa)
 
+js_draw_loc = """
+<script>
+    setTimeout(function() {
+        try {
+            if (typeof L !== 'undefined' && L.drawLocal && L.drawLocal.draw && L.drawLocal.draw.toolbar) {
+                L.drawLocal.draw.toolbar.actions.title = 'Cancelar desenho';
+                L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
+                L.drawLocal.draw.toolbar.finish.title = 'Finalizar desenho';
+                L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
+                L.drawLocal.draw.toolbar.undo.title = 'Desfazer último ponto';
+                L.drawLocal.draw.toolbar.undo.text = 'Desfazer';
+                L.drawLocal.draw.toolbar.buttons.polygon = 'Desenhar um polígono';
+                L.drawLocal.draw.toolbar.buttons.polyline = 'Desenhar uma linha';
+                L.drawLocal.draw.toolbar.buttons.rectangle = 'Desenhar um retângulo';
+                L.drawLocal.draw.toolbar.buttons.circle = 'Desenhar um círculo';
+                L.drawLocal.draw.toolbar.buttons.marker = 'Adicionar um marcador';
+                L.drawLocal.draw.toolbar.buttons.circlemarker = 'Adicionar marcador circular';
+            }
+            if (typeof L !== 'undefined' && L.drawLocal && L.drawLocal.edit && L.drawLocal.edit.toolbar) {
+                L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
+                L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
+                L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
+                L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
+                L.drawLocal.edit.toolbar.actions.clearAll.title = 'Apagar todos os desenhos';
+                L.drawLocal.edit.toolbar.actions.clearAll.text = 'Apagar Tudo';
+            }
+        } catch (e) { console.log("Folium Draw Erro: ", e); }
+    }, 500);
+</script>
+"""
+mapa.get_root().html.add_child(folium.Element(js_draw_loc))
+
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-    attr='Tiles &copy; Esri',
+    attr='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
     name='Mapa Base (Escuro - Foco em Redes)',
     overlay=False,
     control=True,
@@ -735,6 +772,7 @@ if not df.empty:
 
     for _, row in df_mapa.iterrows():
         tipo_rede = str(row['TIPO_REDE']).upper()
+        
         cor_oficial = dict_cores_render.get(tipo_rede, row['COR'])
         if pd.isna(cor_oficial) or not cor_oficial:
             cor_oficial = '#333333'
@@ -1030,7 +1068,7 @@ with table_container:
                 st.dataframe(df_invalidas[cols_to_show], use_container_width=True)
 
 # -------------------------------------------------------------
-# 6. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL DO MAPA (HTML NATIVO)
+# 6. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL DO MAPA (ST_FOLIUM RESTAURADO)
 # -------------------------------------------------------------
 if zoom_lat is not None and zoom_lon is not None:
     mapa.fit_bounds([[zoom_lat - 0.001, zoom_lon - 0.001], [zoom_lat + 0.001, zoom_lon + 0.001]])
@@ -1054,5 +1092,6 @@ elif todas_lats and todas_lons:
     mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
 
 with map_container:
-    # Burlamos a lentidão e quedas do Streamlit enviando o HTML direto para o navegador
-    components.html(mapa._repr_html_(), height=850)
+    st.markdown("### Mapa de Redes e Obras")
+    # A TRAVA DE PROTEÇÃO: returned_objects=[] impede a quebra de memória RAM e mantém a estética do Streamlit
+    st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
