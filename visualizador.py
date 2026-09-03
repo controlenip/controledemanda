@@ -186,6 +186,9 @@ def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
         mun_norm = remove_accents(municipio)
         if mun_norm in base_map: regional = base_map[mun_norm]
     if regional == "N/A":
+        reg_match = re.search(r'name=["\'](?:REGIONAL|REGIAO)["\'][^>]*>(.*?)</', conteudo_kml, re.IGNORECASE)
+        if reg_match: regional = reg_match.group(1).strip().upper()
+    if regional == "N/A":
         sigla_match = re.search(r'\[([A-Z]{3})\]', nome_arquivo)
         if sigla_match: regional = sigla_match.group(1)
     registros_flat = []
@@ -401,28 +404,65 @@ def verificar_areas_da_obra(lat, lon):
     return "<br>".join(encontradas) if encontradas else "Nenhuma restrição"
 
 # ==========================================
-# 3. INTERFACE E FILTROS LATERAIS
+# 3. INTERFACE E SINCRONIZAÇÃO VIA GITHUB
 # ==========================================
 with st.sidebar:
-    with st.expander("📥 1. Upload de Redes", expanded=False):
-        arquivos_upados = st.file_uploader("Arraste novos KMZs aqui", type=["kmz", "kml"], accept_multiple_files=True)
-        if arquivos_upados:
-            if st.button(f"💾 Processar e Salvar {len(arquivos_upados)} Arquivo(s)", type="primary", use_container_width=True):
-                qtd_total_processados, tamanho_lote = 0, 3
-                total_lotes = math.ceil(len(arquivos_upados) / tamanho_lote)
-                barra_progresso, texto_status = st.progress(0.0), st.empty()
-                for i in range(0, len(arquivos_upados), tamanho_lote):
+    with st.expander("📥 1. Banco de Dados e Sincronização", expanded=True):
+        st.markdown("A ferramenta lê as redes automaticamente da pasta **`kmzs`** no repositório.")
+        
+        # Garante que a pasta kmzs exista
+        pasta_kmz = "kmzs"
+        if not os.path.exists(pasta_kmz):
+            os.makedirs(pasta_kmz, exist_ok=True)
+            
+        # Lista os arquivos disponíveis no GitHub localmente
+        arquivos_repositorio = [f for f in os.listdir(pasta_kmz) if f.lower().endswith(('.kmz', '.kml'))]
+        
+        # Compara com o que já foi salvo no Banco de Dados
+        alims_no_banco = set(df['ALIMENTADOR'].tolist()) if not df.empty else set()
+        
+        # Filtra apenas os arquivos que ainda não foram convertidos para o banco
+        arquivos_novos = []
+        for f in arquivos_repositorio:
+            nome_alim = f.upper().replace('.KMZ', '').replace('.KML', '')
+            if nome_alim not in alims_no_banco:
+                arquivos_novos.append(f)
+                
+        if arquivos_novos:
+            st.info(f"📂 {len(arquivos_novos)} arquivo(s) novo(s) na pasta '{pasta_kmz}' aguardando processamento.")
+            
+            if st.button(f"🚀 Sincronizar {len(arquivos_novos)} Novas Redes", type="primary", use_container_width=True):
+                class LocalFileAdapter:
+                    def __init__(self, filepath):
+                        self.name = os.path.basename(filepath)
+                        self.filepath = filepath
+                    def getvalue(self):
+                        with open(self.filepath, 'rb') as f:
+                            return f.read()
+                            
+                lista_adapters = [LocalFileAdapter(os.path.join(pasta_kmz, f)) for f in arquivos_novos]
+                
+                qtd_total_processados = 0
+                tamanho_lote = 15 
+                total_lotes = math.ceil(len(lista_adapters) / tamanho_lote)
+                barra_progresso = st.progress(0.0)
+                texto_status = st.empty()
+                
+                for i in range(0, len(lista_adapters), tamanho_lote):
                     lote_atual = (i // tamanho_lote) + 1
-                    lote_arquivos = arquivos_upados[i:i+tamanho_lote]
-                    texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes}...")
+                    lote_arquivos = lista_adapters[i:i+tamanho_lote]
+                    texto_status.text(f"⏳ Processando e Salvando Lote {lote_atual} de {total_lotes}...")
                     qtd_total_processados += processar_e_salvar_kmz_paralelo(lote_arquivos)
                     barra_progresso.progress(lote_atual / total_lotes)
-                    gc.collect() 
+                    gc.collect()
+                    
                 if qtd_total_processados > 0:
-                    st.success(f"✅ {qtd_total_processados} novos Alimentadores salvos!")
+                    st.success(f"✅ Sincronização finalizada! {qtd_total_processados} redes salvas no banco de dados rápido.")
                     carregar_banco_redes.clear()
-                    time.sleep(1.5)
+                    time.sleep(2)
                     st.rerun()
+        else:
+            st.success(f"✅ O banco de dados está atualizado com os arquivos da pasta `{pasta_kmz}`.")
 
     with st.expander("🔎 2. Pesquisas Inteligentes", expanded=False):
         tab_nome, tab_coord = st.tabs(["📝 Por Nome/ID", "📍 Por Coordenada"])
@@ -455,10 +495,20 @@ with st.sidebar:
         
         lista_alimentadores = sorted(df_filt['ALIMENTADOR'].unique().tolist()) if not df_filt.empty else []
         alim_sel = st.multiselect("⚡ Alimentador:", lista_alimentadores)
-        alimentadores_visiveis = alim_sel if alim_sel else lista_alimentadores
+        
+        # OTIMIZAÇÃO: Anti-Travamento de Tela
+        LIMITE_REDES_SIMULTANEAS = 15
+        if not alim_sel:
+            if len(lista_alimentadores) > LIMITE_REDES_SIMULTANEAS:
+                st.warning(f"⚠️ **Prevenção de Travamento:** Existem {len(lista_alimentadores)} redes ativas nesta área. Desenhando apenas as primeiras {LIMITE_REDES_SIMULTANEAS} no mapa. Use os filtros acima para especificar.")
+                alimentadores_visiveis = lista_alimentadores[:LIMITE_REDES_SIMULTANEAS]
+            else:
+                alimentadores_visiveis = lista_alimentadores
+        else:
+            alimentadores_visiveis = alim_sel
 
     camadas_ativas = {}
-    if not df.empty:
+    if not df.empty and alimentadores_visiveis:
         with st.expander("🗂️ 4. Camadas (Desempenho)", expanded=False):
             for alim in alimentadores_visiveis:
                 st.markdown(f"**{alim}**")
