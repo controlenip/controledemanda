@@ -148,7 +148,16 @@ def ler_kml_para_geojson(caminho_arquivo, cor_hex):
                     for coord_str in poly.text.strip().split():
                         partes = coord_str.split(',')
                         if len(partes) >= 2: coords.append([float(partes[0]), float(partes[1])])
-                    if coords: features.append({"type": "Feature", "properties": {"NOME": nome, "COR": cor_hex}, "geometry": {"type": "Polygon", "coordinates": [coords]}})
+                    if coords: 
+                        feat = {"type": "Feature", "properties": {"NOME": nome, "COR": cor_hex}, "geometry": {"type": "Polygon", "coordinates": [coords]}}
+                        # CÁLCULO DIRETO NO CACHE: Impede o erro de mutação que travou o seu mapa.
+                        bboxes = []
+                        for ring in feat['geometry']['coordinates']:
+                            lons = [pt[0] for pt in ring]
+                            lats = [pt[1] for pt in ring]
+                            bboxes.append((min(lons), max(lons), min(lats), max(lats)))
+                        feat['bboxes'] = bboxes
+                        features.append(feat)
             for pt in placemark.findall('.//Point/coordinates'):
                 if pt.text:
                     partes = pt.text.strip().split(',')
@@ -162,8 +171,7 @@ def get_kml_cached(path, color):
     return ler_kml_para_geojson(path, color)
 
 def processar_um_kmz(f_name, f_bytes, base_map, geo_data):
-    # Dicionário original - será sobreposto na hora do desenho para maior controle
-    dict_cores = {'REDE PRIMÁRIA': '#0000FF', 'REDE PRIMARIA': '#0000FF', 'REDE SECUNDÁRIA': '#FF00FF', 'REDE SECUNDARIA': '#FF00FF', 'POSTE': '#808080', 'TRANSFORMADOR': '#FFFF00', 'CHAVE': '#3cb44b', 'REGULADOR': '#911eb4', 'RELIGADOR': '#46f0f0', 'CAPACITOR': '#ffe119', 'SUBESTAÇÃO': '#000000', 'SUBESTACAO': '#000000'}
+    dict_cores = {'REDE PRIMÁRIA': '#e6194b', 'REDE PRIMARIA': '#e6194b', 'REDE SECUNDÁRIA': '#4363d8', 'REDE SECUNDARIA': '#4363d8', 'POSTE': '#808080', 'TRANSFORMADOR': '#f58231', 'CHAVE': '#3cb44b', 'REGULADOR': '#911eb4', 'RELIGADOR': '#46f0f0', 'CAPACITOR': '#ffe119', 'SUBESTAÇÃO': '#000000', 'SUBESTACAO': '#000000'}
     nome_arquivo = f_name.upper().replace('.KMZ', '').replace('.KML', '')
     conteudo_kml = ""
     if f_name.lower().endswith('.kmz'):
@@ -345,12 +353,12 @@ def obter_radar_chuva_url():
         return None, None
 
 # ==========================================
-# 2. ESTRUTURA DA TELA E CONTAINERS
+# 2. ESTRUTURA DA TELA E CONTAINERS (FIX: Anti-Colapso)
 # ==========================================
 st.markdown("<h2 style='color: #0D256C;'>🗺️ Gestão de Malha Elétrica e Obras (Inteligência Geográfica)</h2>", unsafe_allow_html=True)
 
-kpi_container = st.empty()
-map_container = st.empty()
+kpi_container = st.container()
+map_container = st.container()
 table_container = st.container()
 
 df = carregar_banco_redes()
@@ -358,26 +366,14 @@ base_map = load_base_mapping()
 geo_data_ibge = get_base_geojson()
 
 # ==========================================
-# PREPARAÇÃO DAS ÁREAS ESPECIAIS (BOUNDING BOX OTIMIZADO)
+# CARREGAMENTO OTIMIZADO DAS ÁREAS ESPECIAIS
 # ==========================================
-def preprocessar_bboxes_kml(geo_data):
-    if not geo_data: return
-    for feat in geo_data['features']:
-        geom = feat['geometry']
-        if geom['type'] == 'Polygon':
-            bboxes = []
-            for ring in geom['coordinates']:
-                lons = [pt[0] for pt in ring]
-                lats = [pt[1] for pt in ring]
-                bboxes.append((min(lons), max(lons), min(lats), max(lats)))
-            feat['bboxes'] = bboxes
-
-geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00"); preprocessar_bboxes_kml(geo_q)
-geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c"); preprocessar_bboxes_kml(geo_i)
-geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b"); preprocessar_bboxes_kml(geo_a)
-geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800"); preprocessar_bboxes_kml(geo_uc_fed)
-geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_est)
-geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_mun)
+geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00")
+geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c")
+geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b")
+geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800")
+geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00")
+geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00")
 
 dict_areas_especiais = {
     "Quilombo": geo_q, "Terra Indígena": geo_i, "Sítio Arqueológico": geo_a,
@@ -393,15 +389,16 @@ def verificar_areas_da_obra(lat, lon):
             nome = feat['properties'].get('NOME', 'Sem Nome')
             if geom['type'] == 'Polygon':
                 for i, ring in enumerate(geom['coordinates']):
-                    min_lon, max_lon, min_lat, max_lat = feat['bboxes'][i]
-                    if (min_lon <= lon <= max_lon) and (min_lat <= lat <= max_lat):
-                        if is_point_in_polygon(lon, lat, ring):
-                            encontradas.append(f"<b>{categoria}:</b> {nome}")
-                            break
+                    if 'bboxes' in feat:
+                        min_lon, max_lon, min_lat, max_lat = feat['bboxes'][i]
+                        if (min_lon <= lon <= max_lon) and (min_lat <= lat <= max_lat):
+                            if is_point_in_polygon(lon, lat, ring):
+                                encontradas.append(f"<b>{categoria}:</b> {html.escape(nome)}")
+                                break
             elif geom['type'] == 'Point':
                 pt_lon, pt_lat = geom['coordinates']
                 if haversine(lat, lon, pt_lat, pt_lon) * 1000 <= 150:
-                    encontradas.append(f"<b>{categoria}:</b> {nome} (Raio 150m)")
+                    encontradas.append(f"<b>{categoria}:</b> {html.escape(nome)} (Raio 150m)")
     return "<br>".join(encontradas) if encontradas else "Nenhuma restrição"
 
 # ==========================================
@@ -507,14 +504,11 @@ with st.sidebar:
             for alim in alimentadores_visiveis:
                 st.markdown(f"**{alim}**")
                 lista_camadas_alim = sorted(df[df['ALIMENTADOR'] == alim]['TIPO_REDE'].unique().tolist())
-                # MELHORIA: Apenas Primária, Secundária, Poste e Transformador marcados por padrão. O resto fica oculto!
                 camadas_essenciais = ['REDE PRIMÁRIA', 'REDE PRIMARIA', 'REDE SECUNDÁRIA', 'REDE SECUNDARIA', 'TRANSFORMADOR', 'POSTE']
                 camadas_default = [c for c in lista_camadas_alim if c in camadas_essenciais]
-                # O multiselect permite que o usuário adicione CHAVE, RELIGADOR, etc., se quiser ver.
                 camadas_ativas[alim] = st.multiselect("Visibilidade das Camadas:", lista_camadas_alim, default=camadas_default, key=f"ms_{alim}")
             
     with st.expander("🗺️ 5. Áreas Especiais", expanded=False):
-        # MELHORIA: Todos desmarcados por padrão para entregar um mapa limpo (Sem manchas cinzas)
         mostrar_quilombos = st.checkbox("🟠 Áreas Quilombolas", value=False)
         mostrar_indigenas = st.checkbox("🟢 Terras Indígenas", value=False)
         mostrar_arqueologia = st.checkbox("🟤 Sítios Arqueológicos", value=False)
@@ -591,7 +585,7 @@ def render_kpi(icone, titulo, valor, cor_borda):
     </div>
     """
 
-with kpi_container.container():
+with kpi_container:
     c1, c2, c3, c4 = st.columns(4)
     val_alim = len(df['ALIMENTADOR'].unique()) if not df.empty else 0
     val_conc = len(df_concluidas) if df_concluidas is not None else 0
@@ -627,30 +621,34 @@ mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canva
 mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
 Draw(export=False, position='topleft').add_to(mapa)
 
+# Blindagem contra erros de undefined na injeção de script Javascript
 js_draw_loc = """
 <script>
     setTimeout(function() {
-        if (typeof L !== 'undefined' && L.drawLocal) {
-            L.drawLocal.draw.toolbar.actions.title = 'Cancelar desenho';
-            L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
-            L.drawLocal.draw.toolbar.finish.title = 'Finalizar desenho';
-            L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
-            L.drawLocal.draw.toolbar.undo.title = 'Desfazer último ponto';
-            L.drawLocal.draw.toolbar.undo.text = 'Desfazer';
-            L.drawLocal.draw.toolbar.buttons.polygon = 'Desenhar um polígono';
-            L.drawLocal.draw.toolbar.buttons.polyline = 'Desenhar uma linha';
-            L.drawLocal.draw.toolbar.buttons.rectangle = 'Desenhar um retângulo';
-            L.drawLocal.draw.toolbar.buttons.circle = 'Desenhar um círculo';
-            L.drawLocal.draw.toolbar.buttons.marker = 'Adicionar um marcador';
-            L.drawLocal.draw.toolbar.buttons.circlemarker = 'Adicionar marcador circular';
-            
-            L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
-            L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
-            L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
-            L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
-            L.drawLocal.edit.toolbar.actions.clearAll.title = 'Apagar todos os desenhos';
-            L.drawLocal.edit.toolbar.actions.clearAll.text = 'Apagar Tudo';
-        }
+        try {
+            if (typeof L !== 'undefined' && L.drawLocal && L.drawLocal.draw && L.drawLocal.draw.toolbar) {
+                L.drawLocal.draw.toolbar.actions.title = 'Cancelar desenho';
+                L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
+                L.drawLocal.draw.toolbar.finish.title = 'Finalizar desenho';
+                L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
+                L.drawLocal.draw.toolbar.undo.title = 'Desfazer último ponto';
+                L.drawLocal.draw.toolbar.undo.text = 'Desfazer';
+                L.drawLocal.draw.toolbar.buttons.polygon = 'Desenhar um polígono';
+                L.drawLocal.draw.toolbar.buttons.polyline = 'Desenhar uma linha';
+                L.drawLocal.draw.toolbar.buttons.rectangle = 'Desenhar um retângulo';
+                L.drawLocal.draw.toolbar.buttons.circle = 'Desenhar um círculo';
+                L.drawLocal.draw.toolbar.buttons.marker = 'Adicionar um marcador';
+                L.drawLocal.draw.toolbar.buttons.circlemarker = 'Adicionar marcador circular';
+            }
+            if (typeof L !== 'undefined' && L.drawLocal && L.drawLocal.edit && L.drawLocal.edit.toolbar) {
+                L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
+                L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
+                L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
+                L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
+                L.drawLocal.edit.toolbar.actions.clearAll.title = 'Apagar todos os desenhos';
+                L.drawLocal.edit.toolbar.actions.clearAll.text = 'Apagar Tudo';
+            }
+        } catch (e) { console.log("Folium Draw Erro: ", e); }
     }, 500);
 </script>
 """
@@ -667,8 +665,6 @@ folium.TileLayer(
     max_zoom=20
 ).add_to(mapa)
 
-# MELHORIA DE LIMPEZA VISUAL (IBGE):
-# As manchas cinzas no estado inteiro foram desativadas tornando a opacidade 0 por padrão.
 if geo_data_ibge:
     def style_function(feature):
         reg_mun = feature['properties'].get('MUNICIPIO', '')
@@ -680,35 +676,9 @@ if geo_data_ibge:
         elif regioes_sel:
             if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.1}
             else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
-        
-        # Deixa o mapa perfeitamente limpo quando nenhum filtro de cidade/regional está ativado.
         return {'fillColor': 'transparent', 'color': cor_regiao, 'weight': 1, 'fillOpacity': 0.0}
 
     folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
-
-    map_id = mapa.get_name()
-    js_zoom_hide = f"""
-    <script>
-        setTimeout(function() {{
-            var ibge_layer_{map_id} = null;
-            {map_id}.eachLayer(function(layer) {{
-                if (layer.options && layer.options.name === 'Divisão IBGE (Maranhão)') {{
-                    ibge_layer_{map_id} = layer;
-                }}
-            }});
-            {map_id}.on('zoomend', function() {{
-                if (ibge_layer_{map_id}) {{
-                    if ({map_id}.getZoom() > 9) {{
-                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.removeLayer(ibge_layer_{map_id}); }}
-                    }} else {{
-                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.addLayer(ibge_layer_{map_id}); }}
-                    }}
-                }}
-            }});
-        }}, 500);
-    </script>
-    """
-    mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
 
 todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
@@ -771,14 +741,13 @@ if not df.empty:
         df_busca = df_mapa[mask_nome]
         df_mapa = df_mapa[~mask_nome]
 
-    # MELHORIA DE SIMBOLOGIA EXATA
     dict_cores_render = {
-        'REDE PRIMÁRIA': '#0000FF', # Azul 
+        'REDE PRIMÁRIA': '#0000FF', 
         'REDE PRIMARIA': '#0000FF', 
-        'REDE SECUNDÁRIA': '#FF00FF', # Magenta
+        'REDE SECUNDÁRIA': '#FF00FF', 
         'REDE SECUNDARIA': '#FF00FF', 
-        'POSTE': '#808080', # Cinza
-        'TRANSFORMADOR': '#FFFF00', # Amarelo
+        'POSTE': '#808080', 
+        'TRANSFORMADOR': '#FFFF00', 
     }
 
     features_linhas = []
@@ -788,20 +757,24 @@ if not df.empty:
 
     for _, row in df_mapa.iterrows():
         tipo_rede = str(row['TIPO_REDE']).upper()
-        # Força as novas cores, mesmo se no banco de dados antigo a cor for diferente.
-        cor_oficial = dict_cores_render.get(tipo_rede, row['COR'])
         
+        # Blindagem: Assegura que a cor seja sempre uma string e não anule o Leaflet.
+        cor_oficial = dict_cores_render.get(tipo_rede, row['COR'])
+        if pd.isna(cor_oficial) or not cor_oficial:
+            cor_oficial = '#333333'
+            
         if row['TIPO_GEOMETRIA'] == 'Linha':
             coords = [[pt[1], pt[0]] for pt in row['COORDS']]
-            features_linhas.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {
-                    "TIPO_REDE": tipo_rede, "NOME": row['NOME'], "COR": cor_oficial, 
-                    "ALIMENTADOR": row['ALIMENTADOR'], "LOC": f"{row['MUNICIPIO']} - {row['REGIONAL']}"
-                }
-            })
-            for pt in row['COORDS']: todas_lats.append(pt[0]); todas_lons.append(pt[1])
+            if len(coords) > 1:
+                features_linhas.append({
+                    "type": "Feature",
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "properties": {
+                        "TIPO_REDE": html.escape(tipo_rede), "NOME": html.escape(str(row['NOME'])), "COR": cor_oficial, 
+                        "ALIMENTADOR": html.escape(str(row['ALIMENTADOR'])), "LOC": f"{html.escape(str(row['MUNICIPIO']))} - {html.escape(str(row['REGIONAL']))}"
+                    }
+                })
+                for pt in row['COORDS']: todas_lats.append(pt[0]); todas_lons.append(pt[1])
         else:
             lat, lon = row['COORDS'][0], row['COORDS'][1]
             todas_lats.append(lat); todas_lons.append(lon)
@@ -810,8 +783,8 @@ if not df.empty:
                 "type": "Feature",
                 "geometry": {"type": "Point", "coordinates": [lon, lat]},
                 "properties": {
-                    "TIPO_REDE": tipo_rede, "NOME": row['NOME'], "COR": cor_oficial, 
-                    "ALIMENTADOR": row['ALIMENTADOR'], "LOC": f"{row['MUNICIPIO']} - {row['REGIONAL']}",
+                    "TIPO_REDE": html.escape(tipo_rede), "NOME": html.escape(str(row['NOME'])), "COR": cor_oficial, 
+                    "ALIMENTADOR": html.escape(str(row['ALIMENTADOR'])), "LOC": f"{html.escape(str(row['MUNICIPIO']))} - {html.escape(str(row['REGIONAL']))}",
                     "GPS": f"{lat:.5f}, {lon:.5f}"
                 }
             }
@@ -819,12 +792,10 @@ if not df.empty:
             if 'POSTE' in tipo_rede:
                 features_postes.append(feat)
             elif 'TRANSFORMADOR' in tipo_rede:
-                # Trafos são desenhados de forma independente por serem Triângulos.
                 features_trafos.append(row)
             else:
                 features_outros.append(feat)
 
-    # 1. LINHAS (Rede Primária Azul / Secundária Magenta)
     if features_linhas:
         folium.GeoJson(
             {"type": "FeatureCollection", "features": features_linhas},
@@ -834,28 +805,27 @@ if not df.empty:
             popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'LOC'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:'])
         ).add_to(mapa)
 
-    # 2. POSTES (Círculo Cinza com Contorno Preto)
     if features_postes:
         folium.GeoJson(
             {"type": "FeatureCollection", "features": features_postes},
             name="Postes",
-            marker=folium.CircleMarker(radius=5, color='black', weight=1, fillColor='gray', fillOpacity=1.0),
+            marker=folium.CircleMarker(radius=4, color='black', weight=1, fillColor='gray', fillOpacity=1.0),
             tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'Identificação:']),
             popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'LOC', 'GPS'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'])
         ).add_to(mapa)
 
-    # 3. TRANSFORMADORES (Triângulo Amarelo Vibrante)
     if features_trafos:
         fg_trafos = folium.FeatureGroup(name="Transformadores")
         for row in features_trafos:
             lat, lon = row['COORDS'][0], row['COORDS'][1]
+            # Blindagem de Aspas: Usando html.escape em todas as variáveis dinâmicas
             html_popup = f"""
             <div style="font-family: sans-serif; font-size: 13px; min-width: 250px;">
                 <table style="width:100%;">
-                    <tr><td><b>Rede:</b></td><td>{row['TIPO_REDE']}</td></tr>
-                    <tr><td><b>Identificação:</b></td><td>{row['NOME']}</td></tr>
-                    <tr><td><b>Alimentador:</b></td><td>{row['ALIMENTADOR']}</td></tr>
-                    <tr><td><b>Localização:</b></td><td>{row['MUNICIPIO']} - {row['REGIONAL']}</td></tr>
+                    <tr><td><b>Rede:</b></td><td>{html.escape(str(row['TIPO_REDE']))}</td></tr>
+                    <tr><td><b>Identificação:</b></td><td>{html.escape(str(row['NOME']))}</td></tr>
+                    <tr><td><b>Alimentador:</b></td><td>{html.escape(str(row['ALIMENTADOR']))}</td></tr>
+                    <tr><td><b>Localização:</b></td><td>{html.escape(str(row['MUNICIPIO']))} - {html.escape(str(row['REGIONAL']))}</td></tr>
                     <tr><td><b>Coordenadas:</b></td><td>{lat:.5f}, {lon:.5f}</td></tr>
                 </table>
             </div>
@@ -864,22 +834,21 @@ if not df.empty:
                 location=[lat, lon],
                 number_of_sides=3,
                 radius=8,
-                color='yellow',
+                color='#b8860b', # Contorno amarelo mais escuro
                 fillColor='yellow',
                 fillOpacity=0.9,
                 weight=1,
-                tooltip=f"{row['TIPO_REDE']}: {row['NOME']}",
+                tooltip=f"{html.escape(str(row['TIPO_REDE']))}: {html.escape(str(row['NOME']))}",
                 popup=folium.Popup(html_popup, max_width=300)
             ).add_to(fg_trafos)
         fg_trafos.add_to(mapa)
 
-    # 4. OUTROS EQUIPAMENTOS
     if features_outros:
         folium.GeoJson(
             {"type": "FeatureCollection", "features": features_outros},
             name="Outros Equipamentos",
-            style_function=lambda x: {'color': x['properties']['COR'], 'fillColor': x['properties']['COR'], 'radius': 7, 'weight': 2, 'fillOpacity': 1.0},
-            marker=folium.CircleMarker(radius=7, fill=True, fillOpacity=1.0),
+            style_function=lambda x: {'color': x['properties']['COR'], 'fillColor': x['properties']['COR'], 'radius': 6, 'weight': 2, 'fillOpacity': 1.0},
+            marker=folium.CircleMarker(radius=6, fill=True, fillOpacity=1.0),
             tooltip=folium.features.GeoJsonTooltip(fields=['TIPO_REDE', 'NOME'], aliases=['Rede:', 'Identificação:']),
             popup=folium.features.GeoJsonPopup(fields=['TIPO_REDE', 'NOME', 'ALIMENTADOR', 'LOC', 'GPS'], aliases=['Rede:', 'Identificação:', 'Alimentador:', 'Localização:', 'Coordenadas:'])
         ).add_to(mapa)
@@ -890,7 +859,7 @@ if not df.empty:
         sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={row['COORDS'][0]},{row['COORDS'][1]}"
         html_popup = f"""
         <div style="min-width: 250px; font-family: sans-serif;">
-            <h4 style="margin-top: 0; color: #FF00FF; border-bottom: 2px solid #FF00FF; padding-bottom: 5px;">{row['TIPO_REDE']}</h4>
+            <h4 style="margin-top: 0; color: #FF00FF; border-bottom: 2px solid #FF00FF; padding-bottom: 5px;">{html.escape(str(row['TIPO_REDE']))}</h4>
             <table style="width:100%;">
                 <tr><td style="color: #555; padding: 2px;"><b>IDENTIFICAÇÃO:</b></td><td>{html.escape(str(row['NOME']))}</td></tr>
                 <tr><td style="color: #555; padding: 2px;"><b>LOCAL:</b></td><td>{html.escape(str(row['MUNICIPIO']))}</td></tr>
@@ -917,7 +886,7 @@ def calcular_rede_proxima(lat, lon):
     _, idx = tree_grid.query(xyz)
     tipo, nome, g_lat, g_lon = grid_info[idx]
     dist_m = haversine(lat, lon, g_lat, g_lon) * 1000
-    return f"<b>{tipo}</b> {nome} ({dist_m:.1f}m)"
+    return f"<b>{html.escape(str(tipo))}</b> {html.escape(str(nome))} ({dist_m:.1f}m)"
 
 # ==========================================
 # RENDERIZAÇÃO DAS ÁREAS ESPECIAIS (COM POPUPS)
@@ -1110,4 +1079,5 @@ elif todas_lats and todas_lons:
     mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
 
 with map_container:
-    st_folium(mapa, use_container_width=True, height=850, returned_objects=[])
+    st.markdown("### Mapa de Redes e Obras")
+    st_folium(mapa, width=1500, height=850)
