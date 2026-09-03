@@ -12,13 +12,13 @@ import unicodedata
 import folium
 from folium.plugins import HeatMap, MarkerCluster, MeasureControl, Draw
 import gc
-from streamlit_folium import st_folium
 import html
 from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
 import plotly.express as px
 import sqlite3
 import json
+import streamlit.components.v1 as components # NOVO MOTOR GRÁFICO
 
 st.set_page_config(page_title="Gestão de Malha e Projetos", page_icon="🗺️", layout="wide")
 
@@ -150,7 +150,6 @@ def ler_kml_para_geojson(caminho_arquivo, cor_hex):
                         if len(partes) >= 2: coords.append([float(partes[0]), float(partes[1])])
                     if coords: 
                         feat = {"type": "Feature", "properties": {"NOME": nome, "COR": cor_hex}, "geometry": {"type": "Polygon", "coordinates": [coords]}}
-                        # CÁLCULO DIRETO NO CACHE: Impede o erro de mutação que travou o seu mapa.
                         bboxes = []
                         for ring in feat['geometry']['coordinates']:
                             lons = [pt[0] for pt in ring]
@@ -353,7 +352,7 @@ def obter_radar_chuva_url():
         return None, None
 
 # ==========================================
-# 2. ESTRUTURA DA TELA E CONTAINERS (FIX: Anti-Colapso)
+# 2. ESTRUTURA DA TELA E CONTAINERS
 # ==========================================
 st.markdown("<h2 style='color: #0D256C;'>🗺️ Gestão de Malha Elétrica e Obras (Inteligência Geográfica)</h2>", unsafe_allow_html=True)
 
@@ -366,14 +365,26 @@ base_map = load_base_mapping()
 geo_data_ibge = get_base_geojson()
 
 # ==========================================
-# CARREGAMENTO OTIMIZADO DAS ÁREAS ESPECIAIS
+# PREPARAÇÃO DAS ÁREAS ESPECIAIS
 # ==========================================
-geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00")
-geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c")
-geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b")
-geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800")
-geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00")
-geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00")
+def preprocessar_bboxes_kml(geo_data):
+    if not geo_data: return
+    for feat in geo_data['features']:
+        geom = feat['geometry']
+        if geom['type'] == 'Polygon':
+            bboxes = []
+            for ring in geom['coordinates']:
+                lons = [pt[0] for pt in ring]
+                lats = [pt[1] for pt in ring]
+                bboxes.append((min(lons), max(lons), min(lats), max(lats)))
+            feat['bboxes'] = bboxes
+
+geo_q = get_kml_cached("kmls/Áreas Quilombolas.kml", "#ff7f00"); preprocessar_bboxes_kml(geo_q)
+geo_i = get_kml_cached("kmls/Terras Indigenas.kml", "#2ca02c"); preprocessar_bboxes_kml(geo_i)
+geo_a = get_kml_cached("kmls/Sítios Arqueológicos.kml", "#8c564b"); preprocessar_bboxes_kml(geo_a)
+geo_uc_fed = get_kml_cached("kmls/UC Federal.kml", "#e6b800"); preprocessar_bboxes_kml(geo_uc_fed)
+geo_uc_est = get_kml_cached("kmls/UC Estadual.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_est)
+geo_uc_mun = get_kml_cached("kmls/UC Municipal.kml", "#ffff00"); preprocessar_bboxes_kml(geo_uc_mun)
 
 dict_areas_especiais = {
     "Quilombo": geo_q, "Terra Indígena": geo_i, "Sítio Arqueológico": geo_a,
@@ -443,18 +454,18 @@ with st.sidebar:
                 for i in range(0, len(lista_adapters), tamanho_lote):
                     lote_atual = (i // tamanho_lote) + 1
                     lote_arquivos = lista_adapters[i:i+tamanho_lote]
-                    texto_status.text(f"⏳ Processando e Salvando Lote {lote_atual} de {total_lotes}...")
+                    texto_status.text(f"⏳ Processando Lote {lote_atual} de {total_lotes}...")
                     qtd_total_processados += processar_e_salvar_kmz_paralelo(lote_arquivos)
                     barra_progresso.progress(lote_atual / total_lotes)
                     gc.collect()
                     
                 if qtd_total_processados > 0:
-                    st.success(f"✅ Sincronização finalizada! {qtd_total_processados} redes salvas no banco de dados rápido.")
+                    st.success(f"✅ Sincronização finalizada! {qtd_total_processados} redes salvas.")
                     carregar_banco_redes.clear()
                     time.sleep(2)
                     st.rerun()
         else:
-            st.success(f"✅ O banco de dados está atualizado com os arquivos da pasta `{pasta_kmz}`.")
+            st.success(f"✅ O banco de dados está atualizado.")
 
     with st.expander("🔎 2. Pesquisas Inteligentes", expanded=False):
         tab_nome, tab_coord = st.tabs(["📝 Por Nome/ID", "📍 Por Coordenada"])
@@ -491,7 +502,7 @@ with st.sidebar:
         LIMITE_REDES_SIMULTANEAS = 15
         if not alim_sel:
             if len(lista_alimentadores) > LIMITE_REDES_SIMULTANEAS:
-                st.warning(f"⚠️ **Prevenção de Travamento:** Existem {len(lista_alimentadores)} redes ativas nesta área. Desenhando apenas as primeiras {LIMITE_REDES_SIMULTANEAS} no mapa. Use os filtros acima para especificar.")
+                st.warning(f"⚠️ **Proteção de Memória:** {len(lista_alimentadores)} redes detectadas. Exibindo apenas as primeiras {LIMITE_REDES_SIMULTANEAS}. Use os filtros acima.")
                 alimentadores_visiveis = lista_alimentadores[:LIMITE_REDES_SIMULTANEAS]
             else:
                 alimentadores_visiveis = lista_alimentadores
@@ -570,7 +581,7 @@ with st.sidebar:
                 conn.commit()
                 conn.close()
                 carregar_banco_redes.clear()
-                st.success("Excluído do Banco de Dados!")
+                st.success("Excluído!")
                 time.sleep(1)
                 st.rerun()
 
@@ -621,44 +632,11 @@ mapa = folium.Map(location=[-5.2, -45.0], zoom_start=6, tiles=None, prefer_canva
 mapa.add_child(MeasureControl(position='topleft', primary_length_unit='meters', primary_area_unit='sqmeters'))
 Draw(export=False, position='topleft').add_to(mapa)
 
-# Blindagem contra erros de undefined na injeção de script Javascript
-js_draw_loc = """
-<script>
-    setTimeout(function() {
-        try {
-            if (typeof L !== 'undefined' && L.drawLocal && L.drawLocal.draw && L.drawLocal.draw.toolbar) {
-                L.drawLocal.draw.toolbar.actions.title = 'Cancelar desenho';
-                L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
-                L.drawLocal.draw.toolbar.finish.title = 'Finalizar desenho';
-                L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
-                L.drawLocal.draw.toolbar.undo.title = 'Desfazer último ponto';
-                L.drawLocal.draw.toolbar.undo.text = 'Desfazer';
-                L.drawLocal.draw.toolbar.buttons.polygon = 'Desenhar um polígono';
-                L.drawLocal.draw.toolbar.buttons.polyline = 'Desenhar uma linha';
-                L.drawLocal.draw.toolbar.buttons.rectangle = 'Desenhar um retângulo';
-                L.drawLocal.draw.toolbar.buttons.circle = 'Desenhar um círculo';
-                L.drawLocal.draw.toolbar.buttons.marker = 'Adicionar um marcador';
-                L.drawLocal.draw.toolbar.buttons.circlemarker = 'Adicionar marcador circular';
-            }
-            if (typeof L !== 'undefined' && L.drawLocal && L.drawLocal.edit && L.drawLocal.edit.toolbar) {
-                L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
-                L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
-                L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
-                L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
-                L.drawLocal.edit.toolbar.actions.clearAll.title = 'Apagar todos os desenhos';
-                L.drawLocal.edit.toolbar.actions.clearAll.text = 'Apagar Tudo';
-            }
-        } catch (e) { console.log("Folium Draw Erro: ", e); }
-    }, 500);
-</script>
-"""
-mapa.get_root().html.add_child(folium.Element(js_draw_loc))
-
 folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-    attr='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
+    attr='Tiles &copy; Esri',
     name='Mapa Base (Escuro - Foco em Redes)',
     overlay=False,
     control=True,
@@ -757,8 +735,6 @@ if not df.empty:
 
     for _, row in df_mapa.iterrows():
         tipo_rede = str(row['TIPO_REDE']).upper()
-        
-        # Blindagem: Assegura que a cor seja sempre uma string e não anule o Leaflet.
         cor_oficial = dict_cores_render.get(tipo_rede, row['COR'])
         if pd.isna(cor_oficial) or not cor_oficial:
             cor_oficial = '#333333'
@@ -818,7 +794,6 @@ if not df.empty:
         fg_trafos = folium.FeatureGroup(name="Transformadores")
         for row in features_trafos:
             lat, lon = row['COORDS'][0], row['COORDS'][1]
-            # Blindagem de Aspas: Usando html.escape em todas as variáveis dinâmicas
             html_popup = f"""
             <div style="font-family: sans-serif; font-size: 13px; min-width: 250px;">
                 <table style="width:100%;">
@@ -834,7 +809,7 @@ if not df.empty:
                 location=[lat, lon],
                 number_of_sides=3,
                 radius=8,
-                color='#b8860b', # Contorno amarelo mais escuro
+                color='#b8860b', 
                 fillColor='yellow',
                 fillOpacity=0.9,
                 weight=1,
@@ -1055,7 +1030,7 @@ with table_container:
                 st.dataframe(df_invalidas[cols_to_show], use_container_width=True)
 
 # -------------------------------------------------------------
-# 6. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL DO MAPA
+# 6. GERENCIAMENTO DE ZOOM E RENDERIZAÇÃO FINAL DO MAPA (HTML NATIVO)
 # -------------------------------------------------------------
 if zoom_lat is not None and zoom_lon is not None:
     mapa.fit_bounds([[zoom_lat - 0.001, zoom_lon - 0.001], [zoom_lat + 0.001, zoom_lon + 0.001]])
@@ -1079,5 +1054,5 @@ elif todas_lats and todas_lons:
     mapa.fit_bounds([[min(todas_lats), min(todas_lons)], [max(todas_lats), max(todas_lons)]])
 
 with map_container:
-    st.markdown("### Mapa de Redes e Obras")
-    st_folium(mapa, width=1500, height=850)
+    # Burlamos a lentidão e quedas do Streamlit enviando o HTML direto para o navegador
+    components.html(mapa._repr_html_(), height=850)
