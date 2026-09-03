@@ -868,15 +868,32 @@ js_draw_loc = """
 """
 mapa.get_root().html.add_child(folium.Element(js_draw_loc))
 
-# Camadas base: Usando o servidor da ESRI para o mapa escuro (Garante zero marca d'água)
-folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite (Google Maps)', overlay=False, control=True, max_zoom=20).add_to(mapa)
-folium.TileLayer(tiles='OpenStreetMap', name='Mapa Base (Limpo)', overlay=False, control=True, max_zoom=20).add_to(mapa)
+# Camadas base. O OpenStreetMap fica ativo por padrão porque é leve e confiável.
+# Satélite e mapa escuro continuam disponíveis no seletor, mas não atrasam a abertura inicial.
+folium.TileLayer(
+    tiles='OpenStreetMap',
+    name='Mapa Base (Limpo)',
+    overlay=False,
+    control=True,
+    show=True,
+    max_zoom=20
+).add_to(mapa)
+folium.TileLayer(
+    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    attr='Google',
+    name='Satélite (Google Maps)',
+    overlay=False,
+    control=True,
+    show=False,
+    max_zoom=20
+).add_to(mapa)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
     attr='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
     name='Mapa Base (Escuro - Foco em Redes)',
     overlay=False,
     control=True,
+    show=False,
     max_zoom=20
 ).add_to(mapa)
 
@@ -1374,35 +1391,34 @@ with map_container:
         mapa,
         use_container_width=True,
         height=850,
-        returned_objects=["zoom", "bounds"],
+        returned_objects=["zoom", "center", "bounds"],
         key="mapa_principal",
     )
 
-# Salva o viewport devolvido pelo Leaflet. Quando o usuário dá zoom/pan, fazemos
-# uma única reconstrução adicional para buscar apenas os elementos daquela tela.
+# IMPORTANTE: não chamar st.rerun() aqui.
+# O próprio st_folium já provoca uma nova execução quando zoom/centro/bounds mudam.
+# A versão anterior forçava outro rerun ao final de cada execução, criando um ciclo
+# em que o mapa era reconstruído continuamente e permanecia em "Running/Stop".
 if isinstance(estado_mapa, dict):
     novo_zoom = estado_mapa.get("zoom")
+    novo_center = estado_mapa.get("center")
     novos_bounds = estado_mapa.get("bounds")
 
-    zoom_mudou = False
-    bounds_mudou = False
     if novo_zoom is not None:
         try:
-            novo_zoom_f = float(novo_zoom)
-            zoom_mudou = abs(novo_zoom_f - float(st.session_state.get("_mapa_zoom", 6.0))) > 0.01
-            st.session_state["_mapa_zoom"] = novo_zoom_f
+            st.session_state["_mapa_zoom"] = float(novo_zoom)
         except (TypeError, ValueError):
             pass
-    if isinstance(novos_bounds, dict):
-        anterior = st.session_state.get("_mapa_bounds")
-        bounds_mudou = novos_bounds != anterior
-        st.session_state["_mapa_bounds"] = novos_bounds
-        bbox_evento = _extrair_bbox_leaflet(novos_bounds)
-        if bbox_evento is not None:
-            sul, oeste, norte, leste = bbox_evento
-            st.session_state["_mapa_center"] = {"lat": (sul + norte) / 2.0, "lng": (oeste + leste) / 2.0}
 
-    zoom_salvo = float(st.session_state.get("_mapa_zoom", 6.0))
-    # Em zoom baixo não há malha para recarregar, então pan não provoca trabalho extra.
-    if zoom_mudou or (zoom_salvo >= ZOOM_MINIMO_REDE and bounds_mudou):
-        st.rerun()
+    if isinstance(novo_center, dict):
+        try:
+            # Arredondar evita pequenas oscilações de ponto flutuante entre renderizações.
+            st.session_state["_mapa_center"] = {
+                "lat": round(float(novo_center["lat"]), 6),
+                "lng": round(float(novo_center["lng"]), 6),
+            }
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    if isinstance(novos_bounds, dict):
+        st.session_state["_mapa_bounds"] = novos_bounds
