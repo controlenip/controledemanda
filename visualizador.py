@@ -174,10 +174,6 @@ MAPA_CENTRO_INICIAL = (-5.2, -45.0)
 
 if "_mapa_zoom" not in st.session_state:
     st.session_state["_mapa_zoom"] = 6.0
-if "_mapa_center" not in st.session_state:
-    st.session_state["_mapa_center"] = {"lat": MAPA_CENTRO_INICIAL[0], "lng": MAPA_CENTRO_INICIAL[1]}
-if "_mapa_bounds" not in st.session_state:
-    st.session_state["_mapa_bounds"] = None
 
 def _extrair_bbox_leaflet(bounds):
     """Aceita os formatos de bounds retornados pelo streamlit-folium."""
@@ -694,7 +690,7 @@ with st.sidebar:
             st.markdown(
                 f"As divisões dos KMZ ficam disponíveis no **controle de camadas do próprio mapa**. "
                 f"Por padrão ficam ativas somente **Poste, Transformador, Rede Primária e Rede Secundária**. "
-                f"O **mapa base abre primeiro**. A malha é carregada por área visível: redes no zoom {ZOOM_MINIMO_REDE}, transformadores no {ZOOM_MINIMO_REDE + 1} e postes no {ZOOM_MINIMO_REDE + 2}."
+                f"O **mapa base abre primeiro**. A malha é carregada por nível de zoom: redes no zoom {ZOOM_MINIMO_REDE}, transformadores no {ZOOM_MINIMO_REDE + 1} e postes no {ZOOM_MINIMO_REDE + 2}."
             )
             tipos_kmz_disponiveis = sorted(df_filt['TIPO_REDE'].dropna().unique().tolist()) if not df_filt.empty else []
             if tipos_kmz_disponiveis:
@@ -827,9 +823,8 @@ with kpi_container.container():
 # 4. CONSTRUÇÃO DO MAPA FOLIUM (BASE E DARK MODE)
 # ==========================================
 zoom_mapa_atual = float(st.session_state.get("_mapa_zoom", 6.0))
-center_mapa_atual = st.session_state.get("_mapa_center", {"lat": MAPA_CENTRO_INICIAL[0], "lng": MAPA_CENTRO_INICIAL[1]})
 mapa = folium.Map(
-    location=[float(center_mapa_atual.get("lat", MAPA_CENTRO_INICIAL[0])), float(center_mapa_atual.get("lng", MAPA_CENTRO_INICIAL[1]))],
+    location=[MAPA_CENTRO_INICIAL[0], MAPA_CENTRO_INICIAL[1]],
     zoom_start=max(2, min(20, int(round(zoom_mapa_atual)))),
     tiles=None,
     prefer_canvas=True,
@@ -903,45 +898,26 @@ if geo_data_ibge:
         reg_name = feature['properties'].get('REGIONAL', '')
         cor_regiao = feature['properties']['fillColor']
         if municipios_sel:
-            if reg_mun in municipios_sel: return {'fillColor': 'transparent', 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0}
-            else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
+            if reg_mun in municipios_sel:
+                return {'fillColor': cor_regiao, 'color': '#FF00FF', 'weight': 4, 'fillOpacity': 0.22}
+            return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0, 'fillOpacity': 0}
         elif regioes_sel:
-            if reg_name in regioes_sel: return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1.5, 'fillOpacity': 0.12}
-            else: return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0}
-        return {'fillColor': 'transparent', 'color': '#7a7a7a', 'weight': 0.6, 'fillOpacity': 0}
+            if reg_name in regioes_sel:
+                return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1.5, 'fillOpacity': 0.42}
+            return {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0, 'fillOpacity': 0}
+        # Mantém as cores originais das regionais já na abertura do mapa.
+        return {'fillColor': cor_regiao, 'color': cor_regiao, 'weight': 1.0, 'fillOpacity': 0.32}
 
     folium.GeoJson(geo_data_ibge, name="Divisão IBGE (Maranhão)", style_function=style_function, tooltip=folium.features.GeoJsonTooltip(fields=['name', 'REGIONAL'], aliases=['Município:', 'Regional:'], style="background-color: white; color: #333; font-family: arial; font-size: 12px; padding: 10px;"), zoom_on_click=False, show=True).add_to(mapa)
 
-    map_id = mapa.get_name()
-    js_zoom_hide = f"""
-    <script>
-        setTimeout(function() {{
-            var ibge_layer_{map_id} = null;
-            {map_id}.eachLayer(function(layer) {{
-                if (layer.options && layer.options.name === 'Divisão IBGE (Maranhão)') {{
-                    ibge_layer_{map_id} = layer;
-                }}
-            }});
-            {map_id}.on('zoomend', function() {{
-                if (ibge_layer_{map_id}) {{
-                    if ({map_id}.getZoom() > 9) {{
-                        if ({map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.removeLayer(ibge_layer_{map_id}); }}
-                    }} else {{
-                        if (!{map_id}.hasLayer(ibge_layer_{map_id})) {{ {map_id}.addLayer(ibge_layer_{map_id}); }}
-                    }}
-                }}
-            }});
-        }}, 500);
-    </script>
-    """
-    mapa.get_root().html.add_child(folium.Element(js_zoom_hide))
+    # A divisão regional permanece visível; não removemos a camada por zoom.
 
 todas_lats, todas_lons = [], []
 busca_lats, busca_lons = [], []
 
 
 # A rede NÃO é serializada no HTML inicial. Ela só é preparada quando o zoom
-# atual permite, e apenas para o retângulo que está visível no mapa.
+# atual permite. O componente retorna somente o zoom, evitando ciclos de atualização.
 grupos_rede_zoom = []
 tree_grid = None
 grid_info = []
@@ -1004,14 +980,10 @@ if not df.empty:
     carregar_rede_detalhada = zoom_mapa_atual >= ZOOM_MINIMO_REDE
 
     if carregar_rede_detalhada and not df_base_rede.empty:
-        bbox = _extrair_bbox_leaflet(st.session_state.get("_mapa_bounds"))
-        if bbox is None:
-            bbox = _bbox_aproximado_por_zoom(center_mapa_atual, zoom_mapa_atual)
-        bbox = _expandir_bbox(bbox, 0.18)
-
-        # Primeiro corta pelo viewport; depois aplica a renderização progressiva.
-        mask_view = df_base_rede.apply(lambda row: _geometria_intersecta_bbox(row, bbox), axis=1)
-        df_mapa = df_base_rede[mask_view].copy()
+        # Modo estável: o Streamlit reage somente à mudança de ZOOM.
+        # Não usamos center/bounds do componente, pois isso fazia o mapa entrar
+        # em reexecuções sucessivas e permanecer eternamente em "Stop/Running".
+        df_mapa = df_base_rede.copy()
         tipos_zoom = _tipos_renderizaveis_no_zoom(zoom_mapa_atual)
 
         # Cria os nomes das divisões no LayerControl mesmo quando uma delas só
@@ -1029,10 +1001,10 @@ if not df.empty:
 
         # Proteção adicional para não congelar o navegador em áreas muito densas.
         # Em vez de corromper/truncar o KMZ, apenas pede mais zoom antes de desenhar.
-        MAX_ELEMENTOS_VIEWPORT = 18000
+        MAX_ELEMENTOS_VIEWPORT = 30000
         if len(df_render) > MAX_ELEMENTOS_VIEWPORT:
             st.sidebar.warning(
-                f"⚠️ Área muito densa ({len(df_render):,} elementos). Aproxime mais o mapa para carregar os detalhes."
+                f"⚠️ Área muito densa ({len(df_render):,} elementos). Selecione uma Regional, Município ou Alimentador para carregar os detalhes sem travar o navegador."
                 .replace(',', '.')
             )
             df_render = df_render.iloc[0:0]
@@ -1327,7 +1299,7 @@ if mostrar_clima:
         st.sidebar.warning("⚠️ Serviço de radar climático temporariamente indisponível na API central.")
 
 
-# A malha já foi filtrada no servidor pelo zoom e pelo viewport.
+# A malha já foi filtrada no servidor pelo nível de zoom e pelos filtros selecionados.
 # O LayerControl continua permitindo marcar/desmarcar as divisões disponíveis.
 folium.LayerControl(position='topright', collapsed=False).add_to(mapa)
 
@@ -1391,34 +1363,23 @@ with map_container:
         mapa,
         use_container_width=True,
         height=850,
-        returned_objects=["zoom", "center", "bounds"],
-        key="mapa_principal",
+        returned_objects=["zoom"],
+        key="mapa_principal_v4",
     )
 
-# IMPORTANTE: não chamar st.rerun() aqui.
-# O próprio st_folium já provoca uma nova execução quando zoom/centro/bounds mudam.
-# A versão anterior forçava outro rerun ao final de cada execução, criando um ciclo
-# em que o mapa era reconstruído continuamente e permanecia em "Running/Stop".
+# Sincronização estável: apenas o nível de zoom volta do componente.
+# Quando o zoom realmente muda, fazemos UMA reexecução controlada para que
+# a próxima montagem carregue as camadas correspondentes. Center e bounds
+# não são retornados, eliminando o ciclo de reexecuções que deixava o mapa
+# eternamente carregando.
 if isinstance(estado_mapa, dict):
     novo_zoom = estado_mapa.get("zoom")
-    novo_center = estado_mapa.get("center")
-    novos_bounds = estado_mapa.get("bounds")
-
     if novo_zoom is not None:
         try:
-            st.session_state["_mapa_zoom"] = float(novo_zoom)
+            novo_zoom = float(novo_zoom)
+            zoom_salvo = float(st.session_state.get("_mapa_zoom", 6.0))
+            if abs(novo_zoom - zoom_salvo) >= 0.5:
+                st.session_state["_mapa_zoom"] = novo_zoom
+                st.rerun()
         except (TypeError, ValueError):
             pass
-
-    if isinstance(novo_center, dict):
-        try:
-            # Arredondar evita pequenas oscilações de ponto flutuante entre renderizações.
-            st.session_state["_mapa_center"] = {
-                "lat": round(float(novo_center["lat"]), 6),
-                "lng": round(float(novo_center["lng"]), 6),
-            }
-        except (KeyError, TypeError, ValueError):
-            pass
-
-    if isinstance(novos_bounds, dict):
-        st.session_state["_mapa_bounds"] = novos_bounds
